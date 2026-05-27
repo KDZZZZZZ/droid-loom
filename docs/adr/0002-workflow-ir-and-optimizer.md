@@ -1,20 +1,20 @@
-# ADR 0002: Workflow IR and Optimizer
+# 架构决策 0002：工作流 IR 与优化器
 
-Date: 2026-05-27
+日期：2026-05-27
 
-## Status
+## 状态
 
-Accepted.
+已接受。
 
-## Context
+## 背景
 
-The project needs user-defined workflows and agent behavior, but free-form scripts are hard to secure, optimize, or verify. Treating a workflow as a graph gives the runtime a place to reason about observation cost, prompt construction, action risk, retry behavior, and KV-cache lifetime.
+项目需要支持用户定义工作流和 Agent 行为，但自由脚本很难做安全审计、优化和验证。把工作流表示为图，可以让运行时分析 observation 成本、prompt 构造、action 风险、retry 行为和 KV Cache 生命周期。
 
-## Decision
+## 决策
 
-Represent workflows as an intermediate representation with typed nodes, explicit side effects, risk annotations, and verifier edges. Compile workflow definitions into executable plans through a pass manager.
+将工作流表示为中间表示：节点有明确类型，副作用显式声明，风险可标注，验证边可追踪。工作流定义先编译成可执行计划，再交给运行时调度。
 
-Initial IR operations:
+初始 IR 操作：
 
 - `ObserveScreen`
 - `NormalizeState`
@@ -27,41 +27,41 @@ Initial IR operations:
 - `Verify`
 - `TraceWrite`
 
-Initial compiler passes:
+初始编译优化 pass：
 
-- schema validation;
-- capability lowering;
-- observation pruning;
-- prompt constant folding;
-- risk annotation;
-- retry/verifier lowering;
-- prompt segment and KV-cache lifetime analysis;
-- cost planning.
+- schema validation；
+- capability lowering；
+- observation pruning；
+- prompt constant folding；
+- risk annotation；
+- retry/verifier lowering；
+- prompt segment 和 KV Cache 生命周期分析；
+- cost planning。
 
-## Rationale
+## 理由
 
-- A graph makes side effects inspectable before runtime.
-- Prompt segments can be analyzed like values with invalidation keys and lifetimes.
-- Static workflow summaries are necessary for permission disclosure.
-- Verification and retry can be added consistently instead of per-workflow ad hoc logic.
-- The design mirrors TVM at the system level without prematurely coupling to TVM internals.
+- 图结构让副作用可以在运行前被检查。
+- Prompt segments 可以像值一样拥有 invalidation key 和生命周期。
+- 静态工作流摘要是权限披露的必要基础。
+- Verification 和 retry 可以一致地插入，而不是在每个工作流中临时拼接。
+- 该设计在系统层面借鉴 TVM，而不是过早绑定 TVM 内部实现。
 
-## Consequences
+## 影响
 
-Positive:
+正向影响：
 
-- Workflows become testable artifacts.
-- Optimizations can be added incrementally.
-- The runtime can reject unsafe or unsupported workflows before execution.
+- 工作流成为可测试工件。
+- 优化可以逐步添加。
+- 运行时能在执行前拒绝不安全或不支持的工作流。
 
-Negative:
+负向影响：
 
-- Workflow authors must accept a constrained model instead of arbitrary code.
-- Some dynamic agent behavior must be represented as explicit bounded nodes.
-- IR versioning is required once workflows are persisted.
+- 工作流作者必须接受受约束的模型，而不是任意代码。
+- 一些动态 Agent 行为必须表示为显式、有界的节点。
+- 工作流持久化后必须维护 IR 版本。
 
-## Follow-up
+## 后续事项
 
-- Version the IR from the first implementation.
-- Add property tests for graph validation and liveness.
-- Build a human-readable compiler explanation output for each workflow.
+- 从第一次实现开始就给 IR 加版本。
+- 为图校验和 liveness 增加 property tests。
+- 为每个工作流生成人类可读的编译说明。

@@ -1,50 +1,50 @@
-# ADR 0001: LLM Backend Strategy
+# 架构决策 0001：LLM 后端策略
 
-Date: 2026-05-27
+日期：2026-05-27
 
-## Status
+## 状态
 
-Accepted.
+已接受。
 
-## Context
+## 背景
 
-DroidLoom needs local LLM inference on Android and eventually wants compiler-like optimization across workflows. The backend must support small on-device models, predictable memory profiles, and enough build-time/runtime control to study prompt and KV-cache behavior.
+DroidLoom 需要在 Android 上运行本地 LLM 推理，并且最终要围绕工作流做编译式优化。后端必须支持小型端侧模型、可预测的内存 profile，并暴露足够的构建期和运行期控制能力，用于研究 prompt 和 KV Cache 行为。
 
-Candidate paths:
+候选路径：
 
-- MLC LLM.
-- llama.cpp.
-- MediaPipe/LiteRT LLM.
-- Remote LLM provider.
+- MLC LLM。
+- llama.cpp。
+- MediaPipe/LiteRT LLM。
+- 远端 LLM provider。
 
-## Decision
+## 决策
 
-Use MLC LLM as the primary backend and llama.cpp as the secondary fallback behind a shared `LlmEngine` interface.
+以 MLC LLM 作为主后端，以 llama.cpp 作为次级 fallback。两者都通过统一的 `LlmEngine` 接口接入。
 
-## Rationale
+## 理由
 
-- MLC LLM has an Android SDK and a compile/package workflow that produces Android runtime artifacts.
-- MLC is close to Apache TVM, which matches the project's goal of treating workflows like optimizable graphs.
-- MLC exposes context and prefill related knobs that are directly relevant to memory planning.
-- llama.cpp has a strong GGUF ecosystem, Android documentation, and a simpler path for CPU-first fallback.
-- Keeping a backend interface prevents workflow/compiler logic from depending on either runtime too early.
+- MLC LLM 提供 Android SDK 和模型编译/打包工作流，可以生成 Android 运行时产物。
+- MLC 与 Apache TVM 关系紧密，契合本项目把工作流视为可优化图的目标。
+- MLC 暴露上下文窗口和 prefill 相关配置，这些配置与内存规划直接相关。
+- llama.cpp 拥有成熟的 GGUF 生态、Android 文档和更直接的 CPU-first fallback 路径。
+- 统一后端接口可以避免工作流和编译器逻辑过早绑定某个推理运行时。
 
-## Consequences
+## 影响
 
-Positive:
+正向影响：
 
-- Compiler research can target MLC first without blocking practical experiments.
-- llama.cpp gives a robust escape hatch for unsupported models/devices.
-- Model profiling can compare both engines using the same workload.
+- 编译优化研究可以优先面向 MLC，但不会阻断实用实验。
+- llama.cpp 为不支持 MLC 的模型或设备提供稳妥退路。
+- 模型 profile 可以用同一工作负载对比两个引擎。
 
-Negative:
+负向影响：
 
-- Two adapters increase integration and test cost.
-- MLC Android setup is more complex than a pure Java/Kotlin dependency.
-- Backend-specific prefix/KV behavior may not be portable.
+- 两个 adapter 会增加集成和测试成本。
+- MLC Android 环境比纯 Java/Kotlin 依赖更复杂。
+- 后端特定的 prefix/KV 行为不一定完全可移植。
 
-## Follow-up
+## 后续事项
 
-- Define `LlmEngine` capabilities before writing backend-specific code.
-- Build a profiling harness before optimizing.
-- Do not patch backend KV internals until workflow-level prompt segment reuse proves measurable value.
+- 在写后端专用代码前先定义 `LlmEngine` capability。
+- 先建立 profiling harness，再做优化。
+- 在工作流层 prompt segment 复用证明有可测收益前，不修改后端 KV 内部实现。

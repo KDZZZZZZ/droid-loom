@@ -1,132 +1,132 @@
-# Roadmap
+# 路线图
 
-## M0 - Repository and Design
+## M0 - 仓库与设计文档
 
-Status: done in initial repository seed.
+状态：初始仓库已完成。
 
-- Name, license, docs, ADRs.
-- Android capability research.
-- Backend selection research.
-- Workflow compiler architecture.
-- Permission and distribution boundary.
+- 项目命名、许可证、README、技术文档和 ADR。
+- Android 能力链路调研。
+- 本地 LLM 后端选型调研。
+- 工作流编译器架构。
+- 权限和分发边界。
 
-## M1 - Android Shell
+## M1 - Android App 外壳
 
-Goal: build a minimal Android app with permission onboarding and a no-op session controller.
+目标：构建最小 Android App，包含权限引导和空运行的 session controller。
 
-- Kotlin + Gradle Android project.
-- Compose UI for permissions, sessions, and logs.
-- AccessibilityService registration and disclosure screen.
-- Foreground session notification.
-- Local Room/DataStore setup.
-- Unit test skeleton.
+- Kotlin + Gradle Android 项目。
+- Compose UI：权限、session 和日志。
+- AccessibilityService 注册与 disclosure 页面。
+- 前台 session notification。
+- 本地 Room/DataStore 初始化。
+- 单元测试骨架。
 
-Exit criteria:
+验收标准：
 
-- App installs on a physical Android device.
-- User can enable/disable the accessibility service.
-- App records a local, non-sensitive session trace.
+- App 能安装到真实 Android 设备。
+- 用户可以启用和关闭 accessibility service。
+- App 可以记录本地、非敏感 session trace。
 
-## M2 - Screen Observation and Action Executor
+## M2 - 屏幕观察与动作执行器
 
-Goal: complete the first observe-act-verify loop without LLM.
+目标：在不接入 LLM 的情况下跑通首个 observe-act-verify 闭环。
 
-- Accessibility tree snapshot.
-- Node normalization and pruning.
-- Accessibility action executor.
-- Gesture fallback executor.
-- Basic verifier predicates.
-- UI Automator test harness.
+- Accessibility tree snapshot。
+- Node normalization 和 pruning。
+- Accessibility action executor。
+- Gesture fallback executor。
+- 基础 verifier predicates。
+- UI Automator test harness。
 
-Exit criteria:
+验收标准：
 
-- Deterministic workflow can open settings, find a visible UI element, click it, and verify state.
-- Risky actions are blocked unless explicitly allowlisted.
+- 确定性工作流可以打开系统设置、找到可见 UI 元素、点击并校验状态。
+- 高风险动作默认被阻断，除非显式加入 allowlist。
 
-## M3 - LLM Runtime Adapter
+## M3 - LLM 运行时适配
 
-Goal: integrate local model inference through a stable `LlmEngine` interface.
+目标：通过稳定的 `LlmEngine` 接口接入本地模型推理。
 
-- MLC LLM Android adapter proof of concept.
-- llama.cpp adapter proof of concept.
-- Model profile registry.
-- Prompt segment builder.
-- Structured action output parser.
+- MLC LLM Android adapter proof of concept。
+- llama.cpp adapter proof of concept。
+- Model profile registry。
+- Prompt segment builder。
+- Structured action output parser。
 
-Exit criteria:
+验收标准：
 
-- Same planner request can run on MLC or llama.cpp adapter.
-- Basic model profile captures cold start, prefill latency, decode tok/s, and memory estimate.
+- 同一个 planner 请求可以运行在 MLC 或 llama.cpp adapter 上。
+- 基础 model profile 能记录 cold start、prefill latency、decode tok/s 和 memory estimate。
 
-## M4 - Workflow IR and Compiler Passes
+## M4 - 工作流 IR 与编译优化 Pass
 
-Goal: make workflows analyzable and optimizable.
+目标：让工作流成为可分析、可优化、可审计的对象。
 
-- Workflow schema and parser.
-- IR graph model.
-- Pass manager.
-- Capability lowering.
-- Prompt constant folding.
-- Observation pruning.
-- Risk annotation.
-- Retry/verifier lowering.
+- 工作流 schema 和 parser。
+- IR graph model。
+- Pass manager。
+- Capability lowering。
+- Prompt constant folding。
+- Observation pruning。
+- Risk annotation。
+- Retry/verifier lowering。
 
-Exit criteria:
+验收标准：
 
-- Example workflows compile to executable plans.
-- Compiler emits a permission/action summary before execution.
+- 示例工作流可以编译成可执行 plan。
+- 编译器可以在执行前输出权限和动作摘要。
 
-## M5 - KV Lifetime and Context Optimizer
+## M5 - KV 生命周期与上下文优化器
 
-Goal: optimize LLM calls at the workflow layer before touching inference kernels.
+目标：先在工作流层优化 LLM 调用，再考虑推理内核内部改造。
 
-- Prompt segment liveness analysis.
-- Prefix invalidation keys.
-- Session cache metadata.
-- Context-window planner.
-- MLC profile generation for context and prefill chunk choices.
-- llama.cpp profile generation for context size choices.
+- Prompt segment liveness analysis。
+- Prefix invalidation keys。
+- Session cache metadata。
+- Context-window planner。
+- 面向 MLC 的 context 和 prefill chunk 配置建议。
+- 面向 llama.cpp 的 context size 配置建议。
 
-Exit criteria:
+验收标准：
 
-- Repeated workflow runs reduce prefill tokens or prompt rebuild work.
-- Optimizer can explain which prompt segments are reused or invalidated.
+- 重复运行工作流时能减少 prefill tokens 或 prompt rebuild 开销。
+- 优化器可以解释哪些 prompt segments 被复用，哪些被失效。
 
-## M6 - Pixel/OCR Fallback
+## M6 - 像素与 OCR 兜底
 
-Goal: handle screens where accessibility tree is incomplete.
+目标：处理 accessibility tree 不完整的屏幕。
 
-- MediaProjection lifecycle.
-- Foreground service integration.
-- OCR with ML Kit or pluggable OCR.
-- Region-of-interest capture.
-- Observation fusion between tree and OCR.
+- MediaProjection lifecycle。
+- Foreground service integration。
+- OCR with ML Kit or pluggable OCR。
+- Region-of-interest capture。
+- Observation fusion between tree and OCR。
 
-Exit criteria:
+验收标准：
 
-- Workflow can recover when target text is not available in accessibility nodes but visible on screen.
-- Capture session starts only after explicit user action and stops after workflow completion.
+- 目标文本不在 accessibility nodes 中但可见于屏幕时，工作流可以通过 OCR 恢复。
+- Capture session 只在用户明确操作后启动，并在工作流完成后停止。
 
-## M7 - Benchmark Suite
+## M7 - Benchmark 套件
 
-Goal: measure reliability and cost.
+目标：度量可靠性和成本。
 
-- AndroidWorld-inspired tasks.
-- UI Automator replay harness.
-- Success/failure taxonomy.
-- Latency, memory, battery, token metrics.
-- Regression dashboard artifacts.
+- AndroidWorld-inspired tasks。
+- UI Automator replay harness。
+- Success/failure taxonomy。
+- Latency、memory、battery、token metrics。
+- Regression dashboard artifacts。
 
-Exit criteria:
+验收标准：
 
-- Every release candidate runs a fixed task suite.
-- Task failures include trace, screenshot policy result, and verifier output.
+- 每个候选版本都能运行固定任务集。
+- 任务失败时包含 trace、screenshot policy 结果和 verifier output。
 
-## Non-goals Until Later
+## 暂不进入近期范围
 
-- Root-only features.
-- ADB-dependent user runtime.
-- Marketplace for third-party workflows.
-- Silent background operation.
-- Autonomous high-risk actions.
-- Custom fork of MLC or llama.cpp for KV internals before workflow-level cache planning proves value.
+- 依赖 root 的功能。
+- 依赖 ADB 的用户运行时。
+- 第三方工作流 marketplace。
+- 静默后台操作。
+- 自主执行高风险动作。
+- 在工作流层 cache 规划证明价值前，定制 fork MLC 或 llama.cpp 的 KV 内部实现。

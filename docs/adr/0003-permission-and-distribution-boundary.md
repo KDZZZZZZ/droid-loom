@@ -1,57 +1,57 @@
-# ADR 0003: Permission and Distribution Boundary
+# 架构决策 0003：权限与分发边界
 
-Date: 2026-05-27
+日期：2026-05-27
 
-## Status
+## 状态
 
-Accepted.
+已接受。
 
-## Context
+## 背景
 
-DroidLoom needs capabilities that are sensitive on Android:
+DroidLoom 需要使用 Android 上的敏感能力：
 
-- AccessibilityService for screen semantics and UI actions.
-- Optional MediaProjection for pixel capture.
-- Optional NotificationListenerService for notification actions.
-- Local traces that may include app names, visible text, and action history.
+- AccessibilityService：用于屏幕语义和 UI 动作。
+- 可选 MediaProjection：用于像素级捕获。
+- 可选 NotificationListenerService：用于通知读取和通知 action。
+- 本地 trace：可能包含 App 名称、可见文本和动作历史。
 
-Google Play policy around AccessibilityService automation is strict. A general-purpose autonomous assistant that reads the screen and executes actions can conflict with Play policy unless scoped as a qualifying accessibility tool or constrained to narrow deterministic automation.
+Google Play 对 AccessibilityService 自动化有严格政策。一个通用的自主助手如果读取屏幕并执行动作，除非被限定为合规的无障碍工具或收窄为明确的确定性自动化，否则可能与 Play 政策冲突。
 
-## Decision
+## 决策
 
-Start DroidLoom as a research/prototype/internal/sideload project. Do not claim Google Play compatibility until product scope and policy review are completed.
+DroidLoom 先作为 research/prototype/internal/sideload 项目启动。在完成产品范围和政策审查前，不宣称 Google Play 兼容。
 
-Runtime rules:
+运行时规则：
 
-- Every sensitive capability requires explicit user onboarding and a revoke path.
-- The app must show a foreground notification during active agent sessions.
-- Default operation is local-only.
-- Screenshots are ephemeral by default.
-- High-risk actions require user confirmation.
-- Workflows must declare capabilities and side effects before execution.
+- 每个敏感能力都需要明确的用户 onboarding 和撤销路径。
+- 活跃 Agent session 期间必须显示 foreground notification。
+- 默认本地运行。
+- 截图默认短生命周期，不持久化。
+- 高风险动作需要用户确认。
+- 工作流在执行前必须声明能力和副作用。
 
-## Rationale
+## 理由
 
-- It avoids building the wrong product around a policy assumption.
-- It keeps the first engineering milestone focused on a safe, observable runtime.
-- It makes compliance requirements visible in the architecture instead of after implementation.
+- 避免围绕错误的政策假设构建产品。
+- 让第一阶段工程目标聚焦在安全、可观察的运行时。
+- 把合规要求放进架构，而不是实现后再补。
 
-## Consequences
+## 影响
 
-Positive:
+正向影响：
 
-- Lower risk of accidentally building silent or overbroad automation.
-- Clearer docs for contributors.
-- Easier to add policy gates to compiler and runtime.
+- 降低误建静默自动化或过宽权限自动化的风险。
+- 对贡献者而言边界更清晰。
+- 更容易把政策约束加入编译器和运行时。
 
-Negative:
+负向影响：
 
-- Public distribution is delayed.
-- Some desirable autonomous use cases must remain opt-in or unsupported.
-- User testing needs sideload/internal distribution paths first.
+- 公开分发会推迟。
+- 一些理想的自主用例必须保持 opt-in 或暂不支持。
+- 用户测试需要先走侧载或内部测试分发路径。
 
-## Follow-up
+## 后续事项
 
-- Add a permission disclosure checklist before the first Android release.
-- Add a risk taxonomy to workflow schema.
-- Consult Play policy before any store listing work.
+- 第一个 Android release 前增加权限 disclosure checklist。
+- 在工作流 schema 中加入风险分类。
+- 任何商店上架工作前都要重新评估 Play policy。
