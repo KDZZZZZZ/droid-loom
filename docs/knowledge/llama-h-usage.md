@@ -9,12 +9,14 @@
 `llama.h` 不负责 Agent、workflow 或 Android 权限，它只提供本地模型推理能力。DroidLoom 应把它包装在 `runtime-llm` 的 `LlmEngine` 后面：
 
 ```text
-Kotlin LlmEngine
+Kotlin LocalResponses / LlmEngine
   -> JNI bridge
   -> C++ LlamaEngine
       -> llama.h
       -> GGUF model
 ```
+
+Agent 层不应直接依赖本文件里的 C API 细节。上层稳定契约见 [Local Responses 抽象设计](./local-responses-abstraction.md)：它参考 OpenAI Responses API，把 request、stream event、tool call、usage、cache hint 统一起来；本文件只描述该契约落到 `llama.h` 时的底层实现约束。
 
 职责边界：
 

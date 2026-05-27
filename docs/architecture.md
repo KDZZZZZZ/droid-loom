@@ -24,7 +24,8 @@ flowchart TD
     Observer --> Capture[MediaProjection/OCR]
 
     Scheduler --> Planner[Planner / Agent Loop]
-    Planner --> LLM[LlmEngine 接口]
+    Planner --> Responses[LocalResponses 契约]
+    Responses --> LLM[LlmEngine 接口]
     LLM --> MLC[MLC LLM Adapter]
     LLM --> LLAMA[llama.cpp Adapter]
 
@@ -105,6 +106,7 @@ sequenceDiagram
 
 ### `runtime-llm`
 
+- `LocalResponses` 契约：统一 request、stream event、tool call、usage、cache hint，详见 [Local Responses 抽象设计](./knowledge/local-responses-abstraction.md)。
 - `LlmEngine` 接口。
 - MLC LLM adapter。
 - llama.cpp adapter。

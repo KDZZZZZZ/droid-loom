@@ -7,6 +7,7 @@
 - [论文索引](./paper-index.md)：按优先级和主题整理与 DroidLoom 相关的论文。
 - [Repo 索引](./repo-index.md)：按优先级和模块整理值得参考的开源项目。
 - [llama.h 使用文档](./llama-h-usage.md)：基于 `llama.cpp` C API 构建 DroidLoom adapter 的实现参考。
+- [Local Responses 抽象设计](./local-responses-abstraction.md)：参考 OpenAI Responses API，为 DroidLoom 定义本地 Agent/LLM 契约。
 - [论文笔记模板](./paper-note-template.md)：后续深入读单篇论文时使用。
 
 ## 分类标签
@@ -25,6 +26,7 @@
 | `tool-use` | 工具调用 | Intent、Shortcut、Notification、Accessibility action |
 | `safety` | 安全和确认机制 | Guard、Confirm、TakeOver、Trace |
 | `repo` | 开源项目参考 | observation/action、benchmark、KV/runtime、workflow |
+| `api-contract` | Agent/LLM 契约 | Local Responses、stream event、tool call、usage |
 
 ## 使用方式
 
