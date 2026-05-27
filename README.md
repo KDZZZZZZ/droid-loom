@@ -24,6 +24,8 @@ DroidLoom 是一个 Android Agent 运行时与工作流编译器。它面向手�
 - [产品能力边界](./docs/capability-boundary.md)：参考 AutoGLM 后定义的能力等级、禁止清单和确认/接管机制。
 - [系统架构](./docs/architecture.md)：运行时组件、数据流和模块边界。
 - [路线图](./docs/roadmap.md)：分阶段构建计划和验收标准。
+- [分支管理规范](./docs/branching.md)：分支命名、PR、合并、保护规则和 release 分支策略。
+- [CI 设计与调研](./docs/ci.md)：当前 docs CI 和后续 Android/LLM CI 规划。
 - [架构决策 0001](./docs/adr/0001-llm-backend-strategy.md)：以 MLC LLM 为主、llama.cpp 为辅的本地推理后端策略。
 - [架构决策 0002](./docs/adr/0002-workflow-ir-and-optimizer.md)：工作流中间表示与优化器策略。
 - [架构决策 0003](./docs/adr/0003-permission-and-distribution-boundary.md)：Android 权限与分发边界。
