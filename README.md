@@ -21,6 +21,7 @@ DroidLoom 是一个 Android Agent 运行时与工作流编译器。它面向手�
 ## 关键文档
 
 - [技术调研资料](./docs/research.md)：端到端技术选型、风险和参考资料。
+- [产品能力边界](./docs/capability-boundary.md)：参考 AutoGLM 后定义的能力等级、禁止清单和确认/接管机制。
 - [系统架构](./docs/architecture.md)：运行时组件、数据流和模块边界。
 - [路线图](./docs/roadmap.md)：分阶段构建计划和验收标准。
 - [架构决策 0001](./docs/adr/0001-llm-backend-strategy.md)：以 MLC LLM 为主、llama.cpp 为辅的本地推理后端策略。
@@ -32,6 +33,8 @@ DroidLoom 是一个 Android Agent 运行时与工作流编译器。它面向手�
 Android 无障碍自动化是敏感能力。Google Play 政策允许合规使用 AccessibilityService，但如果应用自主发起、规划和执行用户动作，除非它是符合条件的无障碍工具，否则会触碰政策边界。
 
 因此，DroidLoom 应先作为研究型、内部测试或侧载项目推进。等产品范围、权限披露、用户确认机制和分发规则都明确后，再评估是否适合公开上架。
+
+产品能力应按 L0-L5 分级开放：从只读观察、建议模式、确定性工作流，到受限 Agent、高风险确认和人工接管。详见 [产品能力边界](./docs/capability-boundary.md)。
 
 ## 许可证
 

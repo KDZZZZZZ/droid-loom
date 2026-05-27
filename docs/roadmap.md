@@ -9,6 +9,7 @@
 - 本地 LLM 后端选型调研。
 - 工作流编译器架构。
 - 权限和分发边界。
+- 参考 AutoGLM 后定义产品能力等级、禁止清单和人工接管机制。
 
 ## M1 - Android App 外壳
 
@@ -35,6 +36,7 @@
 - Node normalization 和 pruning。
 - Accessibility action executor。
 - Gesture fallback executor。
+- `TakeOver`、`Confirm`、`StopSession` 基础控制动作。
 - 基础 verifier predicates。
 - UI Automator test harness。
 

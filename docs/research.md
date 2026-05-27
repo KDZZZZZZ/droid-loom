@@ -54,7 +54,29 @@ DroidLoom 的核心不是“让 LLM 随机点屏幕”，而是把 Android 可�
 
 不要把 ADB、root、shell 注入作为用户运行时前提。它们可以用于测试、实验室评估或开发者模式，但不应成为普通 Android App 的基础能力。
 
-## 3. 权限、合规与分发风险
+## 3. AutoGLM 产品能力边界参照
+
+AutoGLM-Phone 的公开资料显示，它把“手机使用”能力限制在一个可枚举动作空间内：启动应用、点击、输入、滑动、返回、回桌面、长按、双击、等待和人工接管。它支持 50+ 高频中文 App，但仍然是按支持应用和场景承诺能力，而不是宣称所有 App 通用可靠。
+
+值得 DroidLoom 借鉴的边界：
+
+- 把自然语言目标降级为有限 action schema。
+- 登录、验证码等场景触发 `Take_over`，让用户人工完成。
+- 敏感操作进入确认 callback，未确认不执行。
+- 动作链可回放、可审计、可干预。
+- 云手机或模拟器适合研究、批量任务和隔离真实隐私数据。
+- 私有化部署可以把数据、日志和权限留在用户或企业自己的合规环境。
+
+DroidLoom 与 AutoGLM 的差异也要明确：
+
+- DroidLoom 是 Android 原生 App，不能把 ADB/HDC 作为普通用户运行时前提。
+- DroidLoom 默认在真实用户设备上运行，因此权限、前台通知、可撤销授权和本地日志边界更严格。
+- DroidLoom 要把 Android API、Intent、Shortcut、通知 action、Accessibility node action 和 gesture fallback 统一包装成工具，而不是只输出坐标动作。
+- DroidLoom 的工作流需要进入 IR 和 compiler pass，才能做权限摘要、风险插桩、prompt/KV 生命周期分析和 verifier 插入。
+
+因此，DroidLoom 应把产品能力定义为 L0-L5：只读观察、建议模式、确定性工作流、受限 Agent、高风险确认、人工接管。详细边界见 [产品能力边界](./capability-boundary.md)。
+
+## 4. 权限、合规与分发风险
 
 最大风险来自 Accessibility API policy。Google Play 的官方说明中，使用 Accessibility API 进行自动化的 App 必须保证代用户执行的动作具有“狭窄且清晰理解的目的”；使用该 API 让 App 自主发起、规划、执行动作或决策被明确禁止，除非它是符合条件的 accessibility tool。
 
@@ -66,9 +88,9 @@ DroidLoom 的核心不是“让 LLM 随机点屏幕”，而是把 Android 可�
 - 默认本地推理、本地日志、短生命周期截图；禁止静默上传屏幕、通知、联系人、短信等个人数据。
 - 如果未来走 Play Store，需要重新定义核心用户群和功能，或把自主 Agent 限制为 deterministic workflow executor。
 
-## 4. LLM 后端选型
+## 5. LLM 后端选型
 
-### 4.1 候选对比
+### 5.1 候选对比
 
 | 后端 | 优点 | 风险 | 结论 |
 | --- | --- | --- | --- |
@@ -77,7 +99,7 @@ DroidLoom 的核心不是“让 LLM 随机点屏幕”，而是把 Android 可�
 | MediaPipe/LiteRT LLM | Android 集成体验好，Google AI Edge 生态 | 对自定义 compiler pass 和 KV 生命周期研究的开放度较弱 | 暂不作为主线 |
 | Cloud LLM | 质量高、VLM 能力强 | 隐私、成本、延迟、离线能力弱 | 仅作为可选远端 provider |
 
-### 4.2 推荐后端抽象
+### 5.2 推荐后端抽象
 
 定义一个窄接口，避免工作流层绑定具体推理库：
 
@@ -102,7 +124,7 @@ interface LlmEngine {
 - 设备内存估算；
 - cold start、warm prefill、decode tokens-per-second 指标。
 
-### 4.3 模型策略
+### 5.3 模型策略
 
 MVP 不要追求通用大 VLM。更稳的链路是：
 
@@ -117,9 +139,9 @@ MVP 不要追求通用大 VLM。更稳的链路是：
 - 0.5B-2B 小模型：分类、slot filling、工作流分支判定。
 - 可选远端或边缘 VLM：困难屏幕理解、图像 UI 元素定位。
 
-## 5. 工作流 IR 与优化空间
+## 6. 工作流 IR 与优化空间
 
-### 5.1 IR 节点
+### 6.1 IR 节点
 
 工作流应类比 TVM 的计算图，但节点不是 tensor op，而是 Agent/runtime op：
 
@@ -136,7 +158,7 @@ MVP 不要追求通用大 VLM。更稳的链路是：
 | `Verify` | expected state | pass/fail | 失败恢复 |
 | `TraceWrite` | events | persisted trace | 隐私裁剪、采样 |
 
-### 5.2 编译优化 Pass
+### 6.2 编译优化 Pass
 
 第一批 pass：
 
@@ -149,7 +171,7 @@ MVP 不要追求通用大 VLM。更稳的链路是：
 - Retry lowering：把高级 retry 策略降级为 bounded retry + verifier。
 - Cost planning：根据模型、上下文长度、屏幕采样频率和电量状态选择执行计划。
 
-### 5.3 KV Cache 生命周期分析
+### 6.3 KV Cache 生命周期分析
 
 可先在工作流层做 backend-agnostic 的 KV 生命周期规划，而不是先改 MLC/llama.cpp 内核：
 
@@ -167,7 +189,7 @@ PagedAttention 的启发是把 KV cache 看成分页内存，从而降低碎片�
 
 MLC 已经提供上下文窗口和 prefill chunk 等内存相关配置；llama.cpp 在 Android 文档中也强调 context size 会影响内存峰值。DroidLoom 的 optimizer 应先根据设备 profile 给这些参数生成建议，再逐步深入 backend-specific cache control。
 
-## 6. Android App 架构选型
+## 7. Android App 架构选型
 
 推荐模块：
 
@@ -190,7 +212,7 @@ Android Jetpack：
 - WorkManager：后台下载模型、离线编译包准备、非实时维护任务。不要用它执行长时间屏幕控制任务。
 - Foreground service：仅在用户明确启动的 Agent session 中运行，并显示常驻通知。
 
-## 7. 测试与评估
+## 8. 测试与评估
 
 测试分层：
 
@@ -213,7 +235,7 @@ Android Jetpack：
 - 电量消耗；
 - 权限拒绝恢复率。
 
-## 8. 风险清单
+## 9. 风险清单
 
 | 风险 | 影响 | 缓解 |
 | --- | --- | --- |
@@ -224,7 +246,7 @@ Android Jetpack：
 | 敏感数据泄露 | 安全事故 | 默认本地、最小日志、截图短生命周期、加密存储、导出前脱敏 |
 | 工作流过度动态导致无法优化 | optimizer 价值低 | 限制 IR side effects；schema 化工具；静态 pass + runtime guard 混合 |
 
-## 9. 主要参考资料
+## 10. 主要参考资料
 
 Android 平台：
 
@@ -258,6 +280,9 @@ LLM 运行时与编译器：
 
 移动端和 GUI Agent 研究：
 
+- AutoGLM-Phone 官方文档：https://docs.bigmodel.cn/cn/guide/models/vlm/autoglm-phone
+- Open-AutoGLM README：https://github.com/zai-org/Open-AutoGLM/blob/main/README_en.md
+- AutoGLM 开源说明：https://autoglm.z.ai/blog/
 - AndroidWorld: https://arxiv.org/abs/2405.14573
 - AppAgent: https://arxiv.org/abs/2312.13771
 - Mobile-Agent: https://arxiv.org/abs/2401.16158

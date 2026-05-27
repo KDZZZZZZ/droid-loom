@@ -178,6 +178,9 @@ data class ActionPlan(
 - 默认不保存截图；保存 trace 时只保留脱敏文本和 action 元数据。
 - 每个外部 App/package 可设置 allowlist/denylist。
 - 任何跨 App 发送、支付、删除、授权、公开发布动作都必须人工确认。
+- 运行时必须支持 `TakeOver`、`Confirm`、`StopSession` 和 `TraceReplay` 四类基础控制动作。
+- 产品能力按 L0-L5 分级开放：只读观察、建议模式、确定性工作流、受限 Agent、高风险确认、人工接管。
+- 每个工作流必须绑定 `CapabilityManifest` 和 `SupportedAppMatrix`，不能宣称对所有 App 通用可靠。
 
 ## 8. 首个可运行原型范围
 
