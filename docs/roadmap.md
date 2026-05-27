@@ -27,6 +27,7 @@
 - App 能安装到真实 Android 设备。
 - 用户可以启用和关闭 accessibility service。
 - App 可以记录本地、非敏感 session trace。
+- `dev` 分支可以通过 emulator 完成基础调试和 CI。
 
 ## M2 - 屏幕观察与动作执行器
 
@@ -40,12 +41,14 @@
 - 基础 verifier predicates。
 - UI Automator test harness。
 - 共享真机调试环境和手动 smoke 脚本。
+- `dev -> main` 受控真机 smoke。
 
 验收标准：
 
 - 确定性工作流可以打开系统设置、找到可见 UI 元素、点击并校验状态。
 - 高风险动作默认被阻断，除非显式加入 allowlist。
 - 没有 Android 手机的开发者可以通过共享设备实验室完成基础真机调试。
+- 日常 PR 先在 `dev` 上通过 emulator 验证，进入 `main` 前再跑真机。
 
 ## M3 - LLM 运行时适配
 

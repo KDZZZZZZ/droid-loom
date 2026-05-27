@@ -9,9 +9,10 @@
 推荐方案：
 
 - 日常开发：本地 JVM/unit tests、Android Emulator、GitHub-hosted runner。
-- 无真机开发者：优先使用 Android Device Streaming 或共享真机的远程镜像/ADB。
+- `dev` 分支：用 Android Emulator 调试和跑 CI，不占用共享真机。
+- 无真机开发者：优先用 emulator；遇到无障碍、截图、通知和厂商 ROM 问题时，再使用 Android Device Streaming 或共享真机的远程镜像/ADB。
 - DroidLoom 专项能力：用一台专用真机做 AccessibilityService、MediaProjection、通知、厂商 ROM 行为的 smoke test。
-- CI：公共 PR 不直接跑自托管真机 runner；真机 CI 放到 manual/nightly/trusted branch，或放在私有镜像仓库中跑。
+- CI：功能分支 PR 到 `dev` 跑模拟器；`dev` PR 到 `main` 由有权限的人审批后跑真机。
 - 回归矩阵：等预算允许后接 Firebase Test Lab，而不是靠一台手机覆盖所有设备。
 
 一句话：一台手机可以起步，但它是“设备实验室的最小形态”，不是完整测试矩阵。
@@ -118,20 +119,29 @@ GitHub 官方文档明确建议：self-hosted runner 只用于 private repositor
 
 DroidLoom 当前是 public repo，因此不建议把一台连着真机的自托管 runner 直接暴露给所有 PR。
 
+采用 `dev -> main` 后，真机 runner 的触发条件应该更窄：
+
+- 不跑 `feature/* -> dev`。
+- 不跑 fork PR。
+- 只跑同仓库 `dev` 到 `main` 的 PR。
+- PR 必须经过有权限的人审批。
+- workflow job 必须检查 `github.event.pull_request.head.repo.full_name == github.repository` 和 `github.event.pull_request.head.ref == 'dev'`。
+- 最好叠加 protected environment required reviewers。
+
 可选方案：
 
 | 方案 | 用法 | 优点 | 风险 |
 | --- | --- | --- | --- |
 | Public repo 只跑 GitHub-hosted CI | PR required checks | 安全、简单 | 不能接本地真机 |
-| Self-hosted runner 只跑 `workflow_dispatch` 和 `main` trusted push | 手动/主线 smoke | 起步快 | 仍要保护 workflow 和 branch |
+| Self-hosted runner 只跑 `dev -> main`、`workflow_dispatch` 和 trusted push | 手动/主线 smoke | 起步快 | 仍要保护 workflow、branch 和 environment |
 | 私有 mirror repo 跑真机 CI | public repo 合并后同步到 private CI | 隔离 public PR 风险 | 多一个仓库和同步流程 |
 | Firebase Test Lab | 云端真机/虚拟设备 | 设备矩阵、无需自建 | 成本、权限路径不一定完整 |
 
 推荐当前阶段：
 
-1. Public repo：只设置 GitHub-hosted required checks。
-2. 共享真机：作为人工调试和手动 smoke。
-3. M2 后：新增私有 mirror 或受控 manual workflow 跑真机 smoke。
+1. Public repo：`feature/* -> dev` 只设置 GitHub-hosted required checks 和 emulator smoke。
+2. 共享真机：作为人工调试和 `dev -> main` smoke。
+3. M2 后：新增受控 self-hosted runner，只接受同仓库 `dev -> main`。
 4. Release candidate：Firebase Test Lab + 本地真机双跑。
 
 ## 6. 最小设备实验室配置
@@ -180,6 +190,8 @@ checkout
 name: Physical Device Smoke
 
 on:
+  pull_request:
+    branches: [main]
   workflow_dispatch:
   schedule:
     - cron: "0 18 * * *"
@@ -193,6 +205,10 @@ concurrency:
 
 jobs:
   smoke:
+    if: >
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'dev')
     runs-on: [self-hosted, android-physical, trusted]
     timeout-minutes: 45
     steps:
@@ -208,7 +224,7 @@ jobs:
         run: ./scripts/ci/run_physical_smoke.sh
 ```
 
-这个 workflow 不应作为 public PR 的默认 required check。它适合手动、夜间或 trusted branch。
+这个 workflow 不应作为 public PR 的默认 required check。它适合 `dev -> main`、手动、夜间或 trusted branch。
 
 ## 8. Accessibility/MediaProjection 测试策略
 
@@ -269,12 +285,14 @@ M1：
 - 先不接真机 CI。
 - 文档规定设备实验室要求。
 - Android 工程支持 emulator/unit tests。
+- `dev` 作为模拟器调试和普通 CI 分支。
 
 M2：
 
 - 搭一台共享真机。
 - 建立手动 smoke 脚本。
 - 让无手机开发者通过 scrcpy/SSH 调试。
+- `dev -> main` 开始接入受控真机 smoke。
 
 M3：
 

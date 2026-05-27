@@ -4,17 +4,21 @@
 
 ## 1. 结论
 
-DroidLoom 的 CI 不应该一开始就堆满 Android emulator 和模型编译任务。当前仓库仍是 docs-first，因此现在只启用轻量 docs CI；等 Android 工程进入 M1 后，再增加 Gradle、lint、unit test、debug build、instrumented smoke test 和安全检查。
+DroidLoom 的 CI 按 `dev -> main` 两级门禁设计：
 
-真机测试单独按设备实验室管理，见 [共享 Android 设备实验室与真机 CI](./device-lab.md)。一台手机可以起步，但只适合 manual/nightly/trusted branch smoke，不适合作为 public PR 的默认 required check。
+- 功能分支 PR 到 `dev`：跑 GitHub-hosted CI、Android Emulator、unit tests、lint、debug build。`dev` 就是模拟器调试和日常集成分支。
+- `dev` PR 到 `main`：由有权限的人审批后，跑共享真机 smoke。真机 runner 只接受同仓库 `dev` 到 `main` 的受控 PR。
+- `main`：保持稳定，后续承担 release candidate、tag 和 artifact 产出。
+
+真机测试单独按设备实验室管理，见 [共享 Android 设备实验室与真机 CI](./device-lab.md)。一台手机可以起步，但只适合 `dev -> main`、manual、nightly 或 trusted branch smoke，不适合作为 public fork PR 的默认 required check。
 
 推荐阶段：
 
 1. M0 当前阶段：Markdown hygiene、内部链接检查。
-2. M1 Android 外壳：Gradle wrapper validation、lint、unit test、debug build。
-3. M2 屏幕观察与动作执行：instrumented smoke test，优先 nightly/manual，不阻塞所有 PR。
-4. M3 LLM 后端：后端 adapter 单元测试、模型 profile smoke test，真实模型文件不进仓库。
-5. M4+ 工作流编译器：IR parser、compiler pass、liveness/property tests 作为 required checks。
+2. M1 Android 外壳：`feature/* -> dev` 跑 Gradle wrapper validation、lint、unit test、debug build。
+3. M2 屏幕观察与动作执行：`feature/* -> dev` 跑 emulator smoke；`dev -> main` 跑真机 smoke。
+4. M3 LLM 后端：`dev` 跑 fake/small adapter tests；`main` gate 跑真机 profile smoke，真实大模型文件不进仓库。
+5. M4+ 工作流编译器：IR parser、compiler pass、liveness/property tests 作为 `dev` 和 `main` required checks。
 
 ## 2. 官方资料要点
 
@@ -38,7 +42,7 @@ Android：
 
 当前仓库仍是 docs-first，建议优先新增 `.github/workflows/docs.yml`：
 
-- 触发：push 到 `main`、PR 到 `main`、手动运行。
+- 触发：push 到 `dev`/`main`、PR 到 `dev`/`main`、手动运行。
 - 权限：`contents: read`。
 - 检查：
   - Markdown 文件不能有 CRLF。
@@ -58,9 +62,9 @@ name: Docs
 
 on:
   pull_request:
-    branches: [main]
+    branches: [dev, main]
   push:
-    branches: [main]
+    branches: [dev, main]
   workflow_dispatch:
 
 permissions:
@@ -136,16 +140,16 @@ jobs:
 
 Android 工程生成后新增 `.github/workflows/android.yml`。
 
-建议 workflow：
+建议 workflow 负责 `dev` 的模拟器调试和普通 PR gate：
 
 ```yaml
 name: Android
 
 on:
   pull_request:
-    branches: [main]
+    branches: [dev]
   push:
-    branches: [main]
+    branches: [dev]
   workflow_dispatch:
 
 permissions:
@@ -171,7 +175,7 @@ jobs:
       - name: Build debug APK
         run: ./gradlew assembleDebug
       - name: Upload debug APK
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
         uses: actions/upload-artifact@v4
         with:
           name: debug-apk
@@ -182,8 +186,14 @@ jobs:
 
 - JDK 版本先用 Android Gradle Plugin 广泛支持的 17，等工程确定 AGP/Kotlin 版本后再调整。
 - `setup-gradle` 当前主线已到 v6；Android 工程落地时可以 pin 到具体版本或 commit SHA。
-- APK artifact 只在 `main` push 后上传，PR 不默认产出可分发包。
+- APK artifact 只在 `dev` push 后上传，PR 不默认产出可分发包。
 - 不要在 PR workflow 中使用签名私钥或发布 token。
+
+M2 后为 `dev` 增加 emulator smoke。可以使用 Gradle Managed Devices，或在 GitHub-hosted runner 上创建 AVD。示例任务名应由 Android 工程实际配置决定：
+
+```bash
+./gradlew pixel2Api35DebugAndroidTest
+```
 
 ## 5. Instrumented Test 策略
 
@@ -191,15 +201,16 @@ Android instrumentation test 成本高、耗时长、容易受 emulator 环境�
 
 | 层级 | 触发 | 内容 | 是否 required |
 | --- | --- | --- | --- |
-| Unit/JVM | PR、main push | IR、compiler pass、policy、prompt segment | 是 |
-| Robolectric 或无设备测试 | PR、main push | ViewModel、repository、纯 Android 逻辑 | 是 |
-| Emulator smoke | workflow_dispatch、nightly、核心 PR | Accessibility service 基础能力、简单 UI Automator | 否，早期不阻塞 |
+| Unit/JVM | PR 到 `dev`、`dev` push、PR 到 `main` | IR、compiler pass、policy、prompt segment | 是 |
+| Robolectric 或无设备测试 | PR 到 `dev`、`dev` push、PR 到 `main` | ViewModel、repository、纯 Android 逻辑 | 是 |
+| Emulator smoke | PR 到 `dev`、`dev` push | Accessibility service 基础能力、简单 UI Automator | M2 后逐步 required |
+| 真机 smoke | `dev` PR 到 `main` | Accessibility、Gesture、MediaProjection 最小闭环 | 是 |
 | Firebase Test Lab | nightly、release candidate | 多设备、多 API、长链路测试 | release 前 required |
 | 手工真机 | release candidate | 权限、厂商 ROM、系统设置、后台限制 | release 前 required |
 
-早期不要把 emulator smoke 设成 required check。等测试稳定、耗时可控后，再挑极少数 smoke case 加入 PR gate。
+早期不要把 emulator smoke 设成 `dev` 的 required check。等测试稳定、耗时可控后，再挑极少数 smoke case 加入 `dev` PR gate。
 
-真机 smoke 应先通过共享设备实验室手动或夜间触发。由于本仓库是 public repo，自托管 runner 不应直接接受来自所有 fork PR 的代码。
+真机 smoke 放在 `dev -> main`，不接受来自 fork PR 的代码。由于本仓库是 public repo，自托管 runner 必须只对同仓库 `dev` 分支的受控 PR 开放。
 
 ## 6. LLM 与原生构建 CI
 
@@ -241,10 +252,19 @@ M1：
 - `docs / markdown-hygiene`
 - `android / lint-test-build`
 
-M2-M4：
+M2-M4，`feature/* -> dev`：
 
 - `workflow / unit-property-tests`
 - `android / lint-test-build`
+- `android / emulator-smoke`
+- `security / dependency-review`
+
+M2-M4，`dev -> main`：
+
+- `workflow / unit-property-tests`
+- `android / lint-test-build`
+- `android / emulator-smoke`
+- `device / physical-smoke`
 - `security / dependency-review`
 
 Release candidate：
