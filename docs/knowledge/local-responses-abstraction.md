@@ -2,23 +2,66 @@
 
 日期：2026-05-27
 
-本文定义 DroidLoom 在 Agent 层和本地 LLM 后端之间的稳定抽象。它参考 OpenAI Responses API 的对象模型、流式事件、工具调用和会话状态语义，但不是 OpenAI SDK 的拷贝；DroidLoom 需要在这层加入 Android action、workflow trace、KV Cache 生命周期和上下文复用能力。
+本文定义 DroidLoom 在 Agent Graph 和本地 LLM 后端之间的 Response lower dialect。它参考 OpenAI Responses API 的对象模型、流式事件、工具调用和会话状态语义，但不是 OpenAI SDK 的拷贝；DroidLoom 需要在这层加入 Android action、workflow trace、KV Cache 生命周期、上下文复用和 WorkflowIR lowering metadata。
 
 ## 1. 结论
 
-DroidLoom 应引入一层 `LocalResponses`：
+DroidLoom 应引入一层 `ResponseGraph / ResponseProgram / LocalResponses`：
 
 ```text
-runtime-agent / runtime-workflow
-  -> LocalResponsesClient
-      -> LocalResponseEngine
-          -> LlamaResponseEngine
-              -> llama.h
+WorkflowIR / AgentGraph
+  -> ResponseGraph
+      -> ResponseProgram / ResponseIR
+          -> LocalResponseRequest
+              -> LocalResponseEngine
+                  -> LlamaResponseEngine
+                      -> llama.h
 ```
 
-这层的目标是让 Agent 上层只依赖“请求、输出 item、stream event、tool call、usage、cache event”这些稳定契约；底层可以先用 `llama.h` 实现，后续再切换 MLC LLM、llama-server、远端 OpenAI-compatible backend 或测试 fake engine。
+这层的目标是把高层 workflow 中的 LLM/Agent reasoning 子图 lower 成可执行 response programs。Agent Graph 仍然是最高优化层；ResponseGraph 是 LLM-call lower dialect；LocalResponseRequest 是单个 ResponseProgram 的一次运行实例。
+
+底层可以先用 `llama.h` 实现，后续再切换 MLC LLM、llama-server、远端 OpenAI-compatible backend 或测试 fake engine。
 
 `llama.h` 不提供这层抽象。它只提供 model/context/batch/decode/sampler/memory/state API。OpenAI Responses API 和 llama.cpp server 的 `/v1/responses` 可以作为协议参考，但 DroidLoom 必须保留自己的 cache-aware 和 Android-aware 扩展。
+
+## 1.1 与 ReAct 和 Agent Graph 的关系
+
+优化最高层定为 `WorkflowIR / AgentGraph`，不是 ReAct loop。
+
+```text
+AgentGraph
+  node: ObserveScreen
+  node: ResponseProgram(strategy = ReAct | PlanAct | DirectToolCall)
+  node: Guard
+  node: ExecuteAction
+  node: Verify
+  edge: retry / rollback / continue
+```
+
+ReAct 是 `ResponseProgram` 内部的一种执行策略，用于表达局部的 `reason -> act -> observe`。它不适合作为最高优化层，因为 DroidLoom 需要在 ReAct 外面分析和插入：
+
+- Android 权限和能力披露；
+- high-risk action guard；
+- verifier dominance；
+- observation pruning；
+- tool side-effect ordering；
+- prompt segment hoisting；
+- 跨节点 KV Cache 生命周期；
+- retry、rollback、human takeover；
+- trace replay 和 benchmark harness。
+
+因此：
+
+```text
+单步 agent loop:
+  一个 ResponseProgram 可以足够。
+
+多步 workflow:
+  一组 ResponseProgram 组成 ResponseGraph。
+
+全局编译优化:
+  发生在 AgentGraph / ResponseGraph 上，而不是单个 ReAct loop 上。
+```
 
 ## 2. 参考来源
 
@@ -40,11 +83,58 @@ runtime-agent / runtime-workflow
 | 层 | 负责 | 不负责 |
 | --- | --- | --- |
 | `runtime-agent` | planner loop、tool registry、动作解释、verifier 编排 | token decode、KV 物理操作 |
+| `WorkflowIR / AgentGraph` | 控制流、数据流、权限、风险、状态、verifier、retry、rollback、跨节点 cache 生命周期 | 模型 token decode |
+| `ResponseGraph` | LLM/Agent reasoning 子图、ResponseProgram 依赖、tool output 续接、cache plan 串联 | Android 原始 API 执行 |
 | `LocalResponses` | 统一请求、输出 item、stream event、tool call、usage、cache hint、错误模型 | Android 权限执行、模型 kernel 优化 |
 | `LlamaResponseEngine` | prompt flatten、chat template、grammar、decode loop、KV handle 映射 | workflow 策略、安全确认 |
 | `llama.h` | tokenization、batch、decode、sampler、memory/state API | Responses 对象、tool call、trace 语义 |
 
-这一层的核心价值是把“Agent 怎么思考和调用工具”与“模型怎么生成 token 和复用 KV”解耦。Agent 和性能优化可以并行开发，只要双方遵守同一份 `LocalResponses` 契约。
+这一层的核心价值是把“Agent Graph 怎么 lower 成可执行 LLM step”与“模型怎么生成 token 和复用 KV”解耦。Agent 和性能优化可以并行开发，只要双方遵守同一份 `ResponseProgram / LocalResponses` 契约。
+
+## 3.1 ResponseProgram
+
+`ResponseProgram` 是 WorkflowIR 中 LLM/Agent 节点的 lower 结果。它比单个 OpenAI-style request 更丰富，因为它必须保留 compiler 需要的 sidecar metadata。
+
+```kotlin
+data class ResponseProgram(
+    val id: ResponseProgramId,
+    val strategy: AgentLoopStrategy,
+    val instructions: List<ResponseInputItem>,
+    val inputBindings: List<InputBinding>,
+    val tools: List<ToolSpec>,
+    val control: ResponseControl,
+    val cache: CacheHints,
+    val guards: List<GuardBinding>,
+    val verifiers: List<VerifierBinding>,
+    val trace: TraceConfig,
+    val lowering: ResponseLoweringManifest
+)
+```
+
+`AgentLoopStrategy` 初始支持：
+
+| 策略 | 用途 |
+| --- | --- |
+| `Direct` | 单次结构化输出或直接回答 |
+| `ReAct` | 局部 reason/action/observation 循环 |
+| `PlanAct` | 先产出短计划，再产出 action |
+| `VerifierOnly` | 只做状态判断或分类 |
+
+`ResponseProgram` lower 到 `LocalResponseRequest` 时，runtime 会绑定当前 screen state、tool output、session id 和 cache state。
+
+```kotlin
+data class ResponseLoweringManifest(
+    val workflowId: WorkflowId,
+    val workflowVersion: String,
+    val workflowNodeId: WorkflowNodeId,
+    val responseProgramId: ResponseProgramId,
+    val segmentMap: List<PromptSegmentBinding>,
+    val toolMap: List<ToolBinding>,
+    val cachePlanId: CachePlanId,
+    val verifierRefs: List<VerifierNodeId>,
+    val guardPolicyRefs: List<GuardPolicyId>
+)
+```
 
 ## 4. 请求对象
 
@@ -66,7 +156,8 @@ data class LocalResponseRequest(
     val stream: Boolean = true,
     val metadata: Map<String, String> = emptyMap(),
     val cache: CacheHints = CacheHints.None,
-    val trace: TraceConfig = TraceConfig.Default
+    val trace: TraceConfig = TraceConfig.Default,
+    val lowering: ResponseLoweringManifest
 )
 ```
 
@@ -87,6 +178,7 @@ data class LocalResponseRequest(
 | `sessionId` | 无完全等价 | 本地 session、权限、trace、KV 生命周期作用域 |
 | `cache` | `prompt_cache_key` / `prompt_cache_retention` | 本地 cache hint、segment id、KV 复用策略 |
 | `trace` | `metadata` / dashboard trace | DroidLoom 本地可观测事件配置 |
+| `lowering` | 无直接对应 | WorkflowIR、ResponseProgram、tool、segment、verifier、guard 的映射关系 |
 
 ### 4.1 `instructions` 和 `input`
 
@@ -476,4 +568,10 @@ LocalResponsesClient
 - OpenAI Python `Response`: https://github.com/openai/openai-python/blob/main/src/openai/types/responses/response.py
 - OpenAI Python `ResponseStreamEvent`: https://github.com/openai/openai-python/blob/main/src/openai/types/responses/response_stream_event.py
 - llama.cpp server README: https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md
+- ReAct: https://arxiv.org/abs/2210.03629
+- LangGraph overview: https://docs.langchain.com/oss/python/langgraph/overview
+- OpenAI Agents SDK: https://openai.github.io/openai-agents-python/
+- Microsoft Agent Framework overview: https://learn.microsoft.com/en-us/agent-framework/overview/
+- LlamaIndex Workflows: https://docs.llamaindex.ai/en/stable/workflows/
+- CrewAI Flows: https://docs.crewai.com/en/concepts/flows
 - DroidLoom [`llama.h` 使用文档](./llama-h-usage.md)
