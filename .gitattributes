@@ -1,0 +1,13 @@
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.pdf binary
+*.gguf binary
+*.safetensors binary
+*.apk binary
+*.aab binary
+*.so binary

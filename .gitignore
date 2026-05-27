@@ -1,0 +1,38 @@
+# Android / Gradle
+.gradle/
+build/
+*/build/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+
+# Kotlin / Java
+*.class
+*.jar
+*.war
+
+# Native / model artifacts
+dist/
+*.so
+*.aar
+*.apk
+*.aab
+*.gguf
+*.safetensors
+*.bin
+*.onnx
+*.tflite
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Logs
+*.log
