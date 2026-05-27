@@ -24,21 +24,33 @@ WorkflowIR / AgentGraph
 
 `llama.h` 不提供这层抽象。它只提供 model/context/batch/decode/sampler/memory/state API。OpenAI Responses API 和 llama.cpp server 的 `/v1/responses` 可以作为协议参考，但 DroidLoom 必须保留自己的 cache-aware 和 Android-aware 扩展。
 
-## 1.1 与 ReAct 和 Agent Graph 的关系
+## 1.1 与 Agent Graph 和循环控制的关系
 
 优化最高层定为 `WorkflowIR / AgentGraph`，不是 ReAct loop。
 
 ```text
 AgentGraph
   node: ObserveScreen
-  node: ResponseProgram(strategy = ReAct | PlanAct | DirectToolCall)
+  node: ResponseProgram
+  node: ToolDispatch
   node: Guard
   node: ExecuteAction
   node: Verify
-  edge: retry / rollback / continue
+  edge: continue / retry / rollback / loop
 ```
 
-ReAct 是 `ResponseProgram` 内部的一种执行策略，用于表达局部的 `reason -> act -> observe`。它不适合作为最高优化层，因为 DroidLoom 需要在 ReAct 外面分析和插入：
+ResponseProgram 不预设 agent loop。ReAct、Plan-Act、反思重试、多 agent handoff 都应由 AgentGraph/ResponseGraph 的节点和边表达，而不是成为 ResponseProgram 的枚举字段。
+
+ReAct 可以被表达为 graph pattern：
+
+```text
+ResponseProgram(reason_and_select_tool)
+  -> ToolDispatch
+  -> ObserveScreen
+  -> ResponseProgram(next_reason_or_finish)
+```
+
+它不适合作为最高优化层，也不应藏在 ResponseProgram 内部，因为 DroidLoom 需要在循环边界外分析和插入：
 
 - Android 权限和能力披露；
 - high-risk action guard；
@@ -53,14 +65,14 @@ ReAct 是 `ResponseProgram` 内部的一种执行策略，用于表达局部的 
 因此：
 
 ```text
-单步 agent loop:
-  一个 ResponseProgram 可以足够。
+单次模型决策:
+  如果只需要一次模型决策，一个 ResponseProgram 可以足够。
 
 多步 workflow:
-  一组 ResponseProgram 组成 ResponseGraph。
+  一组 ResponseProgram 和 tool/observe/verifier 节点组成 ResponseGraph。
 
 全局编译优化:
-  发生在 AgentGraph / ResponseGraph 上，而不是单个 ReAct loop 上。
+  发生在 AgentGraph / ResponseGraph 上，而不是单个 ResponseProgram 内部。
 ```
 
 ## 2. 参考来源
@@ -93,16 +105,15 @@ ReAct 是 `ResponseProgram` 内部的一种执行策略，用于表达局部的 
 
 ## 3.1 ResponseProgram
 
-`ResponseProgram` 是 WorkflowIR 中 LLM/Agent 节点的 lower 结果。它比单个 OpenAI-style request 更丰富，因为它必须保留 compiler 需要的 sidecar metadata。
+`ResponseProgram` 是 WorkflowIR 中单次模型交互节点的 lower 结果。它比单个 OpenAI-style request 更丰富，因为它必须保留 compiler 需要的 sidecar metadata，但它不内置 agent loop。
 
 ```kotlin
 data class ResponseProgram(
     val id: ResponseProgramId,
-    val strategy: AgentLoopStrategy,
     val instructions: List<ResponseInputItem>,
     val inputBindings: List<InputBinding>,
     val tools: List<ToolSpec>,
-    val control: ResponseControl,
+    val constraints: ResponseConstraints,
     val cache: CacheHints,
     val guards: List<GuardBinding>,
     val verifiers: List<VerifierBinding>,
@@ -111,14 +122,16 @@ data class ResponseProgram(
 )
 ```
 
-`AgentLoopStrategy` 初始支持：
+`ResponseConstraints` 只描述单次模型交互的约束，例如最大输出 token、结构化输出 schema、tool choice、是否允许并行无副作用工具。它不能包含 loop 策略。
 
-| 策略 | 用途 |
+循环语义属于 ResponseGraph：
+
+| 图结构 | 用途 |
 | --- | --- |
-| `Direct` | 单次结构化输出或直接回答 |
-| `ReAct` | 局部 reason/action/observation 循环 |
-| `PlanAct` | 先产出短计划，再产出 action |
-| `VerifierOnly` | 只做状态判断或分类 |
+| `ResponseProgram -> ToolDispatch -> ObserveScreen -> ResponseProgram` | ReAct-style 循环 |
+| `ResponseProgram -> Guard -> ExecuteAction -> Verify` | 受控 action 执行 |
+| `Verify -> ResponseProgram` | 失败重试或反思 |
+| `ResponseProgram -> HumanApproval -> ExecuteAction` | 高风险动作确认 |
 
 `ResponseProgram` lower 到 `LocalResponseRequest` 时，runtime 会绑定当前 screen state、tool output、session id 和 cache state。
 
