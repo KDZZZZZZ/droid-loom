@@ -248,6 +248,8 @@ Android Jetpack：
 
 ## 10. 主要参考资料
 
+更完整的论文阅读顺序和简介式索引见 [知识库论文索引](./knowledge/paper-index.md)。
+
 Android 平台：
 
 - Android AccessibilityService API: https://developer.android.com/reference/android/accessibilityservice/AccessibilityService
