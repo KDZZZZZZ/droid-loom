@@ -6,6 +6,8 @@
 
 DroidLoom 的 CI 不应该一开始就堆满 Android emulator 和模型编译任务。当前仓库仍是 docs-first，因此现在只启用轻量 docs CI；等 Android 工程进入 M1 后，再增加 Gradle、lint、unit test、debug build、instrumented smoke test 和安全检查。
 
+真机测试单独按设备实验室管理，见 [共享 Android 设备实验室与真机 CI](./device-lab.md)。一台手机可以起步，但只适合 manual/nightly/trusted branch smoke，不适合作为 public PR 的默认 required check。
+
 推荐阶段：
 
 1. M0 当前阶段：Markdown hygiene、内部链接检查。
@@ -196,6 +198,8 @@ Android instrumentation test 成本高、耗时长、容易受 emulator 环境�
 | 手工真机 | release candidate | 权限、厂商 ROM、系统设置、后台限制 | release 前 required |
 
 早期不要把 emulator smoke 设成 required check。等测试稳定、耗时可控后，再挑极少数 smoke case 加入 PR gate。
+
+真机 smoke 应先通过共享设备实验室手动或夜间触发。由于本仓库是 public repo，自托管 runner 不应直接接受来自所有 fork PR 的代码。
 
 ## 6. LLM 与原生构建 CI
 

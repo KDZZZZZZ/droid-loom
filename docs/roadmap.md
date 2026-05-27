@@ -39,11 +39,13 @@
 - `TakeOver`、`Confirm`、`StopSession` 基础控制动作。
 - 基础 verifier predicates。
 - UI Automator test harness。
+- 共享真机调试环境和手动 smoke 脚本。
 
 验收标准：
 
 - 确定性工作流可以打开系统设置、找到可见 UI 元素、点击并校验状态。
 - 高风险动作默认被阻断，除非显式加入 allowlist。
+- 没有 Android 手机的开发者可以通过共享设备实验室完成基础真机调试。
 
 ## M3 - LLM 运行时适配
 
@@ -118,6 +120,7 @@
 - Success/failure taxonomy。
 - Latency、memory、battery、token metrics。
 - Regression dashboard artifacts。
+- Firebase Test Lab 或共享真机 runner 接入 release candidate 测试。
 
 验收标准：
 
