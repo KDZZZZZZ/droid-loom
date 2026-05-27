@@ -248,7 +248,7 @@ Android Jetpack：
 
 ## 10. 主要参考资料
 
-更完整的论文阅读顺序和简介式索引见 [知识库论文索引](./knowledge/paper-index.md)。
+更完整的论文和开源项目索引见 [知识库论文索引](./knowledge/paper-index.md) 与 [知识库 Repo 索引](./knowledge/repo-index.md)。
 
 Android 平台：
 

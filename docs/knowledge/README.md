@@ -5,6 +5,7 @@
 当前入口：
 
 - [论文索引](./paper-index.md)：按优先级和主题整理与 DroidLoom 相关的论文。
+- [Repo 索引](./repo-index.md)：按优先级和模块整理值得参考的开源项目。
 - [论文笔记模板](./paper-note-template.md)：后续深入读单篇论文时使用。
 
 ## 分类标签
@@ -22,13 +23,14 @@
 | `on-device` | 端侧推理 | MLC/llama.cpp、移动 SoC、内存规划 |
 | `tool-use` | 工具调用 | Intent、Shortcut、Notification、Accessibility action |
 | `safety` | 安全和确认机制 | Guard、Confirm、TakeOver、Trace |
+| `repo` | 开源项目参考 | observation/action、benchmark、KV/runtime、workflow |
 
 ## 使用方式
 
-1. 做架构设计时，先看 [论文索引](./paper-index.md) 的 P0。
-2. 实现某个模块前，按标签筛选相关论文。
+1. 做架构设计时，先看 [论文索引](./paper-index.md) 和 [Repo 索引](./repo-index.md) 的 P0。
+2. 实现某个模块前，按标签筛选相关论文和 repo。
 3. 深读论文时，用 [论文笔记模板](./paper-note-template.md) 新建单篇笔记。
-4. 如果论文影响架构决策，补充 ADR，而不是只留在知识库里。
+4. 如果论文或 repo 影响架构决策，补充 ADR，而不是只留在知识库里。
 
 ## 单篇笔记路径规范
 
