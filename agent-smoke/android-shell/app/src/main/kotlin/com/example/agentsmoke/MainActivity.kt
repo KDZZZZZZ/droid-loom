@@ -72,12 +72,12 @@ class MainActivity : Activity() {
                     val registeredTools = agent.listTools().joinToString("\n") { tool ->
                         "- ${tool.name}: ${tool.description}"
                     }
-
-                    val response = agent.promptWithTools(
-                        "Run android_device_info, android_battery, android_show_toast with message " +
+                    val userRequest = intent.getStringExtra("agent_prompt")
+                        ?: "Run android_device_info, android_battery, android_show_toast with message " +
                             "\"Tool call worked\", and android_set_clipboard with text " +
                             "\"copied by Rust Agent\". After the tools return, summarize in Chinese."
-                    )
+
+                    val response = agent.promptWithTools(userRequest)
 
                     val traces = response.toolTraces.joinToString("\n\n") { trace ->
                         "tool: ${trace.name}\ninput: ${trace.inputJson}\noutput: ${trace.output}"
@@ -87,6 +87,7 @@ class MainActivity : Activity() {
                         "OK: Android platform tools demo",
                         "model: ${agent.model()}\n" +
                             "message_count: ${response.messageCount}\n\n" +
+                            "user request:\n$userRequest\n\n" +
                             "registered tools:\n$registeredTools\n\n" +
                             "tool traces:\n$traces\n\n" +
                             "assistant:\n${response.answer}"
