@@ -670,6 +670,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_agent_smoke_checksum_method_agentcore_prompt_with_tools(
     ): Short
+    external fun uniffi_agent_smoke_checksum_method_agentcore_prompt_with_tools_limit(
+    ): Short
     external fun uniffi_agent_smoke_checksum_method_agentcore_register_tool(
     ): Short
     external fun uniffi_agent_smoke_checksum_method_agentcore_reset(
@@ -724,6 +726,8 @@ internal object UniffiLib {
     external fun uniffi_agent_smoke_fn_method_agentcore_prompt(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_agent_smoke_fn_method_agentcore_prompt_with_tools(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_agent_smoke_fn_method_agentcore_prompt_with_tools_limit(`ptr`: Long,`input`: RustBuffer.ByValue,`maxToolRounds`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_agent_smoke_fn_method_agentcore_register_tool(`ptr`: Long,`name`: RustBuffer.ByValue,`description`: RustBuffer.ByValue,`inputSchemaJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -874,6 +878,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_agent_smoke_checksum_method_agentcore_prompt_with_tools() != 18892.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_agent_smoke_checksum_method_agentcore_prompt_with_tools_limit() != 40692.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_agent_smoke_checksum_method_agentcore_register_tool() != 29981.toShort()) {
@@ -1111,6 +1118,29 @@ public object FfiConverterUInt: FfiConverter<UInt, Int> {
 /**
  * @suppress
  */
+public object FfiConverterULong: FfiConverter<ULong, Long> {
+    override fun lift(value: Long): ULong {
+        return value.toULong()
+    }
+
+    override fun read(buf: ByteBuffer): ULong {
+        return lift(buf.getLong())
+    }
+
+    override fun lower(value: ULong): Long {
+        return value.toLong()
+    }
+
+    override fun allocationSize(value: ULong) = 8UL
+
+    override fun write(value: ULong, buf: ByteBuffer) {
+        buf.putLong(value.toLong())
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
     // Note: we don't inherit from FfiConverterRustBuffer, because we use a
     // special encoding when lowering/lifting.  We can use `RustBuffer.len` to
@@ -1274,6 +1304,8 @@ public interface AgentCoreInterface {
     fun `prompt`(`input`: kotlin.String): AgentResponse
     
     fun `promptWithTools`(`input`: kotlin.String): AgentResponse
+    
+    fun `promptWithToolsLimit`(`input`: kotlin.String, `maxToolRounds`: kotlin.UInt): AgentResponse
     
     fun `registerTool`(`name`: kotlin.String, `description`: kotlin.String, `inputSchemaJson`: kotlin.String)
     
@@ -1465,6 +1497,20 @@ open class AgentCore: Disposable, AutoCloseable, AgentCoreInterface
     UniffiLib.uniffi_agent_smoke_fn_method_agentcore_prompt_with_tools(
         it,
         FfiConverterString.lower(`input`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(AgentException::class)override fun `promptWithToolsLimit`(`input`: kotlin.String, `maxToolRounds`: kotlin.UInt): AgentResponse {
+            return FfiConverterTypeAgentResponse.lift(
+    callWithHandle {
+    uniffiRustCallWithError(AgentException) { _status ->
+    UniffiLib.uniffi_agent_smoke_fn_method_agentcore_prompt_with_tools_limit(
+        it,
+        FfiConverterString.lower(`input`),FfiConverterUInt.lower(`maxToolRounds`),_status)
 }
     }
     )
@@ -1890,6 +1936,12 @@ data class AgentResponse (
     var `messageCount`: kotlin.UInt
     , 
     var `toolTraces`: List<ToolTrace>
+    , 
+    var `inputTokens`: kotlin.ULong
+    , 
+    var `outputTokens`: kotlin.ULong
+    , 
+    var `totalTokens`: kotlin.ULong
     
 ){
     
@@ -1909,19 +1961,28 @@ public object FfiConverterTypeAgentResponse: FfiConverterRustBuffer<AgentRespons
             FfiConverterString.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterSequenceTypeToolTrace.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
         )
     }
 
     override fun allocationSize(value: AgentResponse) = (
             FfiConverterString.allocationSize(value.`answer`) +
             FfiConverterUInt.allocationSize(value.`messageCount`) +
-            FfiConverterSequenceTypeToolTrace.allocationSize(value.`toolTraces`)
+            FfiConverterSequenceTypeToolTrace.allocationSize(value.`toolTraces`) +
+            FfiConverterULong.allocationSize(value.`inputTokens`) +
+            FfiConverterULong.allocationSize(value.`outputTokens`) +
+            FfiConverterULong.allocationSize(value.`totalTokens`)
     )
 
     override fun write(value: AgentResponse, buf: ByteBuffer) {
             FfiConverterString.write(value.`answer`, buf)
             FfiConverterUInt.write(value.`messageCount`, buf)
             FfiConverterSequenceTypeToolTrace.write(value.`toolTraces`, buf)
+            FfiConverterULong.write(value.`inputTokens`, buf)
+            FfiConverterULong.write(value.`outputTokens`, buf)
+            FfiConverterULong.write(value.`totalTokens`, buf)
     }
 }
 

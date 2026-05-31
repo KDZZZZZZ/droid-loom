@@ -26,13 +26,13 @@ $env:CC_aarch64_linux_android = Join-Path $toolchain "aarch64-linux-android$ApiL
 $env:AR_aarch64_linux_android = Join-Path $toolchain "llvm-ar.exe"
 $env:CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER = $env:CC_aarch64_linux_android
 $env:CARGO_TARGET_AARCH64_LINUX_ANDROID_AR = $env:AR_aarch64_linux_android
-cargo build --target aarch64-linux-android
+cargo build --manifest-path Cargo.toml --target-dir target --target aarch64-linux-android
 
 $env:CC_x86_64_linux_android = Join-Path $toolchain "x86_64-linux-android$ApiLevel-clang.cmd"
 $env:AR_x86_64_linux_android = Join-Path $toolchain "llvm-ar.exe"
 $env:CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER = $env:CC_x86_64_linux_android
 $env:CARGO_TARGET_X86_64_LINUX_ANDROID_AR = $env:AR_x86_64_linux_android
-cargo build --target x86_64-linux-android
+cargo build --manifest-path Cargo.toml --target-dir target --target x86_64-linux-android
 
 New-Item -ItemType Directory -Force android-shell\app\src\main\jniLibs\arm64-v8a | Out-Null
 New-Item -ItemType Directory -Force android-shell\app\src\main\jniLibs\x86_64 | Out-Null

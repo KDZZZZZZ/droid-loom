@@ -1,0 +1,14 @@
+[package]
+name = "agent-core"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+ureq = { version = "2", features = ["json"] }

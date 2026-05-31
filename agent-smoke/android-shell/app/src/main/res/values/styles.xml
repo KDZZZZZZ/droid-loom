@@ -1,4 +1,6 @@
 <resources>
+    <string name="accessibility_service_description">Agent Smoke reads the active screen and performs user-requested phone actions while the floating agent is running.</string>
+
     <style name="AppTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowLightStatusBar">true</item>

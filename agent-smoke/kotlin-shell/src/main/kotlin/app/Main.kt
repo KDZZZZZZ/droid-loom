@@ -10,14 +10,16 @@ fun main(args: Array<String>) {
         .toString()
     System.setProperty("uniffi.component.agent_smoke.libraryOverride", libraryPath)
 
-    val apiKey = System.getenv("DEEPSEEK_API_KEY")
-        ?: error("DEEPSEEK_API_KEY is not set")
-    val model = System.getenv("DEEPSEEK_MODEL") ?: "deepseek-v4-pro"
+    val apiKey = firstEnv("MIMO_API_KEY", "DEEPSEEK_API_KEY")
+        ?: error("MIMO_API_KEY is not set")
+    val model = firstEnv("MIMO_MODEL", "DEEPSEEK_MODEL") ?: "mimo-v2.5-pro"
+    val apiBase = firstEnv("MIMO_API_BASE", "DEEPSEEK_API_BASE")
+        ?: "https://api.xiaomimimo.com/v1"
     val prompt = args.joinToString(" ").ifBlank {
         "Say in one sentence that Kotlin called Rust AgentCore through UniFFI."
     }
 
-    AgentCore(apiKey, model).use { agent ->
+    AgentCore.newWithBaseUrl(apiBase, apiKey, model).use { agent ->
         println("library: $libraryPath")
         println("model: ${agent.model()}")
         println("user: $prompt")
@@ -27,3 +29,6 @@ fun main(args: Array<String>) {
         println("message_count: ${response.messageCount}")
     }
 }
+
+private fun firstEnv(vararg names: String): String? =
+    names.firstNotNullOfOrNull { name -> System.getenv(name)?.takeIf { it.isNotBlank() } }

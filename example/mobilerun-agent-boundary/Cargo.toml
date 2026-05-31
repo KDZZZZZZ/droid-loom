@@ -1,0 +1,10 @@
+[package]
+name = "mobilerun-agent-boundary"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+agent-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,6 @@
+/target/
+.env
+.env.*
+/agent-smoke/android-shell/app-map-autonomous-report.json
+/agent-smoke/android-shell/app-map-verification-report.json
+/agent-smoke/android-shell/key-routing-report.json

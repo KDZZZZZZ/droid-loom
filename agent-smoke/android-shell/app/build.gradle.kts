@@ -2,9 +2,18 @@ plugins {
     id("com.android.application")
 }
 
-val deepseekApiKey = providers.environmentVariable("DEEPSEEK_API_KEY").orElse("")
-val deepseekModel = providers.environmentVariable("DEEPSEEK_MODEL").orElse("deepseek-v4-pro")
-val deepseekProxy = providers.environmentVariable("DEEPSEEK_PROXY").orElse("")
+val mimoApiBase = providers.environmentVariable("MIMO_API_BASE")
+    .orElse(providers.environmentVariable("DEEPSEEK_API_BASE"))
+    .orElse("https://api.xiaomimimo.com/v1")
+val mimoApiKey = providers.environmentVariable("MIMO_API_KEY")
+    .orElse(providers.environmentVariable("DEEPSEEK_API_KEY"))
+    .orElse("")
+val mimoModel = providers.environmentVariable("MIMO_MODEL")
+    .orElse(providers.environmentVariable("DEEPSEEK_MODEL"))
+    .orElse("mimo-v2.5-pro")
+val mimoProxy = providers.environmentVariable("MIMO_PROXY")
+    .orElse(providers.environmentVariable("DEEPSEEK_PROXY"))
+    .orElse("")
 
 android {
     namespace = "com.example.agentsmoke"
@@ -21,9 +30,10 @@ android {
         versionCode = 1
         versionName = "0.1.0"
 
-        buildConfigField("String", "DEEPSEEK_API_KEY", "\"${deepseekApiKey.get()}\"")
-        buildConfigField("String", "DEEPSEEK_MODEL", "\"${deepseekModel.get()}\"")
-        buildConfigField("String", "DEEPSEEK_PROXY", "\"${deepseekProxy.get()}\"")
+        buildConfigField("String", "MIMO_API_BASE", "\"${mimoApiBase.get()}\"")
+        buildConfigField("String", "MIMO_API_KEY", "\"${mimoApiKey.get()}\"")
+        buildConfigField("String", "MIMO_MODEL", "\"${mimoModel.get()}\"")
+        buildConfigField("String", "MIMO_PROXY", "\"${mimoProxy.get()}\"")
     }
 
     compileOptions {
