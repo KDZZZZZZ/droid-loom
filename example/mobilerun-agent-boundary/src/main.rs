@@ -8,6 +8,9 @@ mod prompt;
 mod scripted_agent;
 mod task_context;
 
+#[cfg(test)]
+mod public_api_contract;
+
 fn main() -> agent_core::AgentCoreResult<()> {
     let report = scripted_agent::run_boundary_probe()?;
     report.print();
