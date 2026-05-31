@@ -154,7 +154,7 @@ impl AppMapMemory {
 
         let filtered = filter_functional_elements(elements);
         let fingerprint = page_fingerprint(&package, &filtered);
-        let page_id = format!("page:{}", fingerprint);
+        let page_id = format!("page:{fingerprint}");
         let summary = page_summary(&package, &filtered, task_hint);
         let candidate_actions = build_candidate_actions(&page_id, &filtered);
         let key_buttons = filtered

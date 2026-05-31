@@ -7,6 +7,7 @@ use crate::tool_permissions::{
 };
 use crate::tool_registry::ToolRegistry;
 use crate::tool_result::ToolResult;
+use crate::RunMessage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -40,7 +41,16 @@ impl ToolExecutor {
         definition: &AgentDefinition,
         call: ToolCall,
     ) -> AgentCoreResult<ToolResult> {
-        self.call(ToolExecutionRequest { definition, call })
+        self.execute_one_result(definition, call)
+    }
+
+    pub fn execute_one_message(
+        &self,
+        definition: &AgentDefinition,
+        call: ToolCall,
+    ) -> AgentCoreResult<RunMessage> {
+        self.execute_one_result(definition, call)?
+            .into_run_message()
     }
 
     pub fn execute_batch(
@@ -51,6 +61,17 @@ impl ToolExecutor {
         calls
             .into_iter()
             .map(|call| self.execute_one(definition, call))
+            .collect()
+    }
+
+    pub fn execute_batch_messages(
+        &self,
+        definition: &AgentDefinition,
+        calls: Vec<ToolCall>,
+    ) -> AgentCoreResult<Vec<RunMessage>> {
+        self.execute_batch(definition, calls)?
+            .into_iter()
+            .map(|result| result.into_run_message())
             .collect()
     }
 
@@ -88,21 +109,23 @@ impl ToolExecutor {
                 .collect())
         })
     }
-}
 
-pub trait ToolService: Send + Sync {
-    fn call(&self, request: ToolExecutionRequest<'_>) -> AgentCoreResult<ToolResult>;
-}
+    pub fn execute_batch_parallel_messages(
+        &self,
+        definition: &AgentDefinition,
+        calls: Vec<ToolCall>,
+    ) -> AgentCoreResult<Vec<RunMessage>> {
+        self.execute_batch_parallel(definition, calls)?
+            .into_iter()
+            .map(|result| result.into_run_message())
+            .collect()
+    }
 
-pub trait ToolLayer<S> {
-    type Service;
-
-    fn layer(&self, inner: S) -> Self::Service;
-}
-
-impl ToolService for ToolExecutor {
-    fn call(&self, request: ToolExecutionRequest<'_>) -> AgentCoreResult<ToolResult> {
-        let ToolExecutionRequest { definition, call } = request;
+    fn execute_one_result(
+        &self,
+        definition: &AgentDefinition,
+        call: ToolCall,
+    ) -> AgentCoreResult<ToolResult> {
         let tool = self.registry.get_for_agent(definition, &call.tool_name)?;
         tool.metadata().schema.validate_arguments(&call.arguments)?;
 
@@ -148,6 +171,23 @@ impl ToolService for ToolExecutor {
                 matches!(error, AgentCoreError::Recoverable(_)),
             )),
         }
+    }
+}
+
+pub trait ToolService: Send + Sync {
+    fn call(&self, request: ToolExecutionRequest<'_>) -> AgentCoreResult<RunMessage>;
+}
+
+pub trait ToolLayer<S> {
+    type Service;
+
+    fn layer(&self, inner: S) -> Self::Service;
+}
+
+impl ToolService for ToolExecutor {
+    fn call(&self, request: ToolExecutionRequest<'_>) -> AgentCoreResult<RunMessage> {
+        let ToolExecutionRequest { definition, call } = request;
+        self.execute_one_message(definition, call)
     }
 }
 

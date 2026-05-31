@@ -4,7 +4,6 @@ use agent_core::run_message::{MessageRole, RunMessage};
 use agent_core::session_replay::ReplaySnapshot;
 use agent_core::tool_executor::{ToolCall, ToolExecutor};
 use agent_core::tool_registry::ToolRegistry;
-use agent_core::tool_result::ToolResult;
 use agent_core::AgentCoreResult;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -32,7 +31,6 @@ pub struct PreexecutionPlan {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreexecutionOutcome {
-    pub results: Vec<ToolResult>,
     pub messages: Vec<RunMessage>,
 }
 
@@ -168,12 +166,8 @@ impl TrajectoryProbabilityGraph {
         definition: &AgentDefinition,
         plan: PreexecutionPlan,
     ) -> AgentCoreResult<PreexecutionOutcome> {
-        let results = executor.execute_batch_parallel(definition, plan.calls)?;
-        let messages = results
-            .iter()
-            .map(|result| result.into_run_message())
-            .collect::<AgentCoreResult<Vec<_>>>()?;
-        Ok(PreexecutionOutcome { results, messages })
+        let messages = executor.execute_batch_parallel_messages(definition, plan.calls)?;
+        Ok(PreexecutionOutcome { messages })
     }
 
     pub fn plan_tool_layers(
@@ -340,7 +334,6 @@ mod tests {
             TrajectoryProbabilityGraph::execute_preexecution_plan(&executor, &definition, plan)
                 .unwrap();
 
-        assert_eq!(outcome.results.len(), 1);
         assert_eq!(outcome.messages.len(), 1);
     }
 

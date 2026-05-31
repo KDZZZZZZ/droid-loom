@@ -17,25 +17,9 @@ use crate::run_message::{MessageRole, MessageStatus, RunMessage};
 
 pub type NodeId = String;
 pub type EdgeId = String;
-pub type OutputPort = String;
 pub type InputPackageName = String;
 pub type PackageItemName = String;
 pub type ContentHash = u64;
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct OutputRef {
-    pub node: NodeId,
-    pub port: OutputPort,
-}
-
-impl OutputRef {
-    pub fn new(node: impl Into<NodeId>, port: impl Into<OutputPort>) -> Self {
-        Self {
-            node: node.into(),
-            port: port.into(),
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PackageRef {
@@ -53,10 +37,9 @@ impl PackageRef {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct OutputLogEntry {
+pub struct MessageLogEntry {
     pub seq: u64,
     pub node: NodeId,
-    pub port: OutputPort,
     pub message: RunMessage,
     pub message_version: u64,
 }
@@ -90,19 +73,19 @@ impl EdgeState {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphEdge {
     pub id: EdgeId,
-    pub from: OutputRef,
+    pub from: NodeId,
     pub to: PackageRef,
 }
 
 impl GraphEdge {
     pub fn new(
         id: impl Into<EdgeId>,
-        from: (impl Into<NodeId>, impl Into<OutputPort>),
+        from: impl Into<NodeId>,
         to: (impl Into<NodeId>, impl Into<InputPackageName>),
     ) -> Self {
         Self {
             id: id.into(),
-            from: OutputRef::new(from.0, from.1),
+            from: from.into(),
             to: PackageRef::new(to.0, to.1),
         }
     }
@@ -111,7 +94,7 @@ impl GraphEdge {
         &self.id
     }
 
-    pub fn from(&self) -> &OutputRef {
+    pub fn from(&self) -> &str {
         &self.from
     }
 
@@ -252,6 +235,7 @@ impl MessageQuery {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SelectedFields {
+    pub message: RunMessage,
     pub value: Value,
     pub hash: ContentHash,
 }
@@ -261,6 +245,14 @@ fn select_fields(
     mask: &FieldMask,
     content_indexes: Option<&[usize]>,
 ) -> AgentCoreResult<SelectedFields> {
+    let mut selected_message = message.clone();
+    if let Some(indexes) = content_indexes {
+        selected_message.content = indexes
+            .iter()
+            .filter_map(|index| message.content.get(*index).cloned())
+            .collect();
+    }
+
     let value = if mask.include.is_empty() {
         if let Some(indexes) = content_indexes {
             let mut value = serde_json::to_value(message)?;
@@ -287,7 +279,11 @@ fn select_fields(
         Value::Object(object)
     };
     let hash = stable_hash(&value)?;
-    Ok(SelectedFields { value, hash })
+    Ok(SelectedFields {
+        message: selected_message,
+        value,
+        hash,
+    })
 }
 
 fn stable_hash(value: &Value) -> AgentCoreResult<ContentHash> {
@@ -565,9 +561,10 @@ pub enum PackageItemKind {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MatchedContent {
-    pub source: OutputRef,
+    pub source: NodeId,
     pub message_id: Uuid,
     pub message_version: u64,
+    pub message: RunMessage,
     pub selected: SelectedFields,
 }
 
@@ -669,20 +666,54 @@ impl NodeInput {
             optional,
         }
     }
+
+    pub fn required_messages(&self, item: &str) -> Vec<&RunMessage> {
+        self.required
+            .get(item)
+            .into_iter()
+            .flatten()
+            .map(|matched| &matched.message)
+            .collect()
+    }
+
+    pub fn optional_messages(&self, item: &str) -> Vec<&RunMessage> {
+        self.optional
+            .get(item)
+            .into_iter()
+            .flatten()
+            .map(|matched| &matched.message)
+            .collect()
+    }
+
+    pub fn messages(&self, item: &str) -> Vec<&RunMessage> {
+        self.required_messages(item)
+            .into_iter()
+            .chain(self.optional_messages(item))
+            .collect()
+    }
+
+    pub fn cloned_messages(&self, item: &str) -> Vec<RunMessage> {
+        self.messages(item).into_iter().cloned().collect()
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct NodeOutput {
-    pub messages: BTreeMap<OutputPort, Vec<RunMessage>>,
+pub struct NodeResult {
+    pub messages: Vec<RunMessage>,
 }
 
-impl NodeOutput {
+impl NodeResult {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn with_message(mut self, port: impl Into<OutputPort>, message: RunMessage) -> Self {
-        self.messages.entry(port.into()).or_default().push(message);
+    pub fn with_message(mut self, message: RunMessage) -> Self {
+        self.messages.push(message);
+        self
+    }
+
+    pub fn with_messages(mut self, messages: impl IntoIterator<Item = RunMessage>) -> Self {
+        self.messages.extend(messages);
         self
     }
 }
@@ -691,19 +722,13 @@ impl NodeOutput {
 pub struct ToolNodeSpec {
     pub tool_name: String,
     pub call_item: PackageItemName,
-    pub result_port: OutputPort,
 }
 
 impl ToolNodeSpec {
-    pub fn new(
-        tool_name: impl Into<String>,
-        call_item: impl Into<PackageItemName>,
-        result_port: impl Into<OutputPort>,
-    ) -> Self {
+    pub fn new(tool_name: impl Into<String>, call_item: impl Into<PackageItemName>) -> Self {
         Self {
             tool_name: tool_name.into(),
             call_item: call_item.into(),
-            result_port: result_port.into(),
         }
     }
 }
@@ -778,7 +803,6 @@ pub struct NodeSpec {
     pub id: NodeId,
     pub kind: NodeKind,
     pub input: InputPackageSpec,
-    pub outputs: Vec<OutputPort>,
     pub concurrency: NodeConcurrency,
 }
 
@@ -788,7 +812,6 @@ impl NodeSpec {
             id: id.into(),
             kind,
             input,
-            outputs: Vec::new(),
             concurrency: NodeConcurrency::Serial,
         }
     }
@@ -809,23 +832,17 @@ impl NodeSpec {
         id: impl Into<NodeId>,
         tool_name: impl Into<String>,
         call_item: impl Into<PackageItemName>,
-        result_port: impl Into<OutputPort>,
         input: InputPackageSpec,
     ) -> Self {
         Self::new(
             id,
-            NodeKind::Tool(ToolNodeSpec::new(tool_name, call_item, result_port)),
+            NodeKind::Tool(ToolNodeSpec::new(tool_name, call_item)),
             input,
         )
     }
 
     pub fn final_node(id: impl Into<NodeId>, input: InputPackageSpec) -> Self {
         Self::new(id, NodeKind::Final, input)
-    }
-
-    pub fn output(mut self, port: impl Into<OutputPort>) -> Self {
-        self.outputs.push(port.into());
-        self
     }
 
     pub fn concurrency(mut self, concurrency: NodeConcurrency) -> Self {
@@ -839,7 +856,7 @@ pub struct GraphSpec {
     pub name: String,
     pub nodes: BTreeMap<NodeId, NodeSpec>,
     pub edges: Vec<GraphEdge>,
-    pub input: OutputRef,
+    pub input: NodeId,
     pub finish_node: Option<NodeId>,
 }
 
@@ -864,7 +881,7 @@ impl GraphSpec {
         &self.edges
     }
 
-    pub fn input(&self) -> &OutputRef {
+    pub fn input(&self) -> &str {
         &self.input
     }
 
@@ -878,7 +895,7 @@ pub struct GraphSpecBuilder {
     name: String,
     nodes: BTreeMap<NodeId, NodeSpec>,
     edges: Vec<GraphEdge>,
-    input: OutputRef,
+    input: NodeId,
     finish_node: Option<NodeId>,
 }
 
@@ -888,13 +905,13 @@ impl GraphSpecBuilder {
             name: name.into(),
             nodes: BTreeMap::new(),
             edges: Vec::new(),
-            input: OutputRef::new("input", "messages"),
+            input: "input".to_string(),
             finish_node: None,
         }
     }
 
-    pub fn input(mut self, node: impl Into<NodeId>, port: impl Into<OutputPort>) -> Self {
-        self.input = OutputRef::new(node, port);
+    pub fn input(mut self, node: impl Into<NodeId>) -> Self {
+        self.input = node.into();
         self
     }
 
@@ -906,7 +923,7 @@ impl GraphSpecBuilder {
     pub fn edge(
         mut self,
         id: impl Into<EdgeId>,
-        from: (impl Into<NodeId>, impl Into<OutputPort>),
+        from: impl Into<NodeId>,
         to: (impl Into<NodeId>, impl Into<InputPackageName>),
     ) -> Self {
         self.edges.push(GraphEdge::new(id, from, to));
@@ -926,10 +943,10 @@ impl GraphSpecBuilder {
         }
 
         for edge in &self.edges {
-            if edge.from.node != self.input.node && !self.nodes.contains_key(&edge.from.node) {
+            if edge.from != self.input && !self.nodes.contains_key(&edge.from) {
                 return Err(AgentCoreError::InvalidConfig(format!(
                     "edge {} source node not found: {}",
-                    edge.id, edge.from.node
+                    edge.id, edge.from
                 )));
             }
             let Some(target) = self.nodes.get(&edge.to.node) else {
@@ -975,7 +992,7 @@ pub struct NodeActivation {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct GraphRuntimeState {
-    pub output_logs: BTreeMap<OutputRef, Vec<OutputLogEntry>>,
+    pub message_logs: BTreeMap<NodeId, Vec<MessageLogEntry>>,
     pub edge_states: BTreeMap<EdgeId, EdgeState>,
     pub package_states: BTreeMap<PackageRef, PackageState>,
 }
@@ -983,7 +1000,7 @@ pub struct GraphRuntimeState {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EdgeTransferRecord {
     pub edge_id: EdgeId,
-    pub from: OutputRef,
+    pub from: NodeId,
     pub to: PackageRef,
     pub item: PackageItemName,
     pub message_id: Uuid,
@@ -1112,20 +1129,20 @@ pub trait NodeExecutor: Send + Sync {
         node: NodeSpec,
         input: NodeInput,
         ctx: NodeExecutionContext,
-    ) -> BoxFuture<'static, AgentCoreResult<NodeOutput>>;
+    ) -> BoxFuture<'static, AgentCoreResult<NodeResult>>;
 }
 
 impl<F, Fut> NodeExecutor for F
 where
     F: Fn(NodeSpec, NodeInput, NodeExecutionContext) -> Fut + Send + Sync,
-    Fut: Future<Output = AgentCoreResult<NodeOutput>> + Send + 'static,
+    Fut: Future<Output = AgentCoreResult<NodeResult>> + Send + 'static,
 {
     fn execute(
         &self,
         node: NodeSpec,
         input: NodeInput,
         ctx: NodeExecutionContext,
-    ) -> BoxFuture<'static, AgentCoreResult<NodeOutput>> {
+    ) -> BoxFuture<'static, AgentCoreResult<NodeResult>> {
         Box::pin(self(node, input, ctx))
     }
 }
@@ -1148,7 +1165,7 @@ struct RunningResult {
     node_id: NodeId,
     package_version: u64,
     concurrency_key: Option<String>,
-    output: AgentCoreResult<NodeOutput>,
+    output: AgentCoreResult<NodeResult>,
 }
 
 #[derive(Default)]
@@ -1238,7 +1255,7 @@ impl GraphRuntime {
             graph,
             services,
             state: GraphRuntimeState {
-                output_logs: BTreeMap::new(),
+                message_logs: BTreeMap::new(),
                 edge_states,
                 package_states,
             },
@@ -1261,7 +1278,7 @@ impl GraphRuntime {
 
         for message in input.initial_messages {
             let graph_input = self.graph.input.clone();
-            self.commit_output(&graph_input, message);
+            self.commit_message(&graph_input, message);
         }
 
         let mut ticks = 0usize;
@@ -1316,7 +1333,7 @@ impl GraphRuntime {
     fn finish(self, status: GraphRunStatus, error: Option<String>) -> GraphRunOutput {
         let messages = self
             .state
-            .output_logs
+            .message_logs
             .values()
             .flat_map(|entries| entries.iter().map(|entry| entry.message.clone()))
             .collect();
@@ -1329,15 +1346,14 @@ impl GraphRuntime {
         }
     }
 
-    fn commit_output(&mut self, output: &OutputRef, mut message: RunMessage) {
-        message.set_source_node_id_if_empty(output.node.clone());
+    fn commit_message(&mut self, node: &str, mut message: RunMessage) {
+        message.set_source_node_id_if_empty(node.to_string());
         let message_version = self.next_message_version(message.id);
-        let log = self.state.output_logs.entry(output.clone()).or_default();
+        let log = self.state.message_logs.entry(node.to_string()).or_default();
         let seq = log.len() as u64;
-        log.push(OutputLogEntry {
+        log.push(MessageLogEntry {
             seq,
-            node: output.node.clone(),
-            port: output.port.clone(),
+            node: node.to_string(),
             message,
             message_version,
         });
@@ -1345,7 +1361,7 @@ impl GraphRuntime {
 
     fn next_message_version(&self, message_id: Uuid) -> u64 {
         self.state
-            .output_logs
+            .message_logs
             .values()
             .flat_map(|entries| entries.iter())
             .filter(|entry| entry.message.id == message_id)
@@ -1369,7 +1385,7 @@ impl GraphRuntime {
 
             let entries = self
                 .state
-                .output_logs
+                .message_logs
                 .get(&edge.from)
                 .cloned()
                 .unwrap_or_default();
@@ -1390,7 +1406,11 @@ impl GraphRuntime {
         Ok(())
     }
 
-    fn deliver_entry(&mut self, edge: &GraphEdge, entry: &OutputLogEntry) -> AgentCoreResult<bool> {
+    fn deliver_entry(
+        &mut self,
+        edge: &GraphEdge,
+        entry: &MessageLogEntry,
+    ) -> AgentCoreResult<bool> {
         let target_node = self.graph.nodes.get(&edge.to.node).ok_or_else(|| {
             AgentCoreError::InvalidConfig(format!("edge target node not found: {}", edge.to.node))
         })?;
@@ -1425,6 +1445,7 @@ impl GraphRuntime {
                 source: edge.from.clone(),
                 message_id: entry.message.id,
                 message_version: entry.message_version,
+                message: selected.message.clone(),
                 selected,
             };
             let package_state = self.state.package_states.get_mut(&edge.to).ok_or_else(|| {
@@ -1556,11 +1577,8 @@ impl GraphRuntime {
             .finish(&result.node_id, result.concurrency_key);
         match result.output {
             Ok(output) => {
-                for (port, messages) in output.messages {
-                    let output_ref = OutputRef::new(result.node_id.clone(), port);
-                    for message in messages {
-                        self.commit_output(&output_ref, message);
-                    }
+                for message in output.messages {
+                    self.commit_message(&result.node_id, message);
                 }
                 self.ledger.node_attempts.push(NodeAttemptRecord {
                     attempt_id: result.attempt_id,
@@ -1646,11 +1664,7 @@ mod tests {
     fn target_graph(package: InputPackageSpec) -> GraphSpec {
         GraphSpec::builder("target")
             .node(NodeSpec::final_node("target", package))
-            .edge(
-                "input_to_target",
-                ("input", "messages"),
-                ("target", "input"),
-            )
+            .edge("input_to_target", "input", ("target", "input"))
             .finish_at("target")
             .build()
             .unwrap()
@@ -1671,16 +1685,16 @@ mod tests {
     #[derive(Clone, Default)]
     struct TestExecutor {
         inputs: Arc<Mutex<Vec<(NodeId, NodeInput)>>>,
-        outputs: Arc<Mutex<BTreeMap<NodeId, NodeOutput>>>,
+        results: Arc<Mutex<BTreeMap<NodeId, NodeResult>>>,
         errors: Arc<Mutex<BTreeMap<NodeId, String>>>,
     }
 
     impl TestExecutor {
-        fn output(self, node: &str, output: NodeOutput) -> Self {
-            self.outputs
+        fn result(self, node: &str, result: NodeResult) -> Self {
+            self.results
                 .lock()
                 .unwrap()
-                .insert(node.to_string(), output);
+                .insert(node.to_string(), result);
             self
         }
 
@@ -1709,11 +1723,11 @@ mod tests {
             node: NodeSpec,
             input: NodeInput,
             _ctx: NodeExecutionContext,
-        ) -> BoxFuture<'static, AgentCoreResult<NodeOutput>> {
+        ) -> BoxFuture<'static, AgentCoreResult<NodeResult>> {
             self.inputs.lock().unwrap().push((node.id.clone(), input));
             let error = self.errors.lock().unwrap().get(&node.id).cloned();
             let output = self
-                .outputs
+                .results
                 .lock()
                 .unwrap()
                 .get(&node.id)
@@ -1740,39 +1754,35 @@ mod tests {
             node: NodeSpec,
             input: NodeInput,
             _ctx: NodeExecutionContext,
-        ) -> BoxFuture<'static, AgentCoreResult<NodeOutput>> {
+        ) -> BoxFuture<'static, AgentCoreResult<NodeResult>> {
             self.calls.lock().unwrap().push(node.id.clone());
             Box::pin(async move {
                 let output = match node.kind {
-                    NodeKind::Final => NodeOutput::new(),
-                    NodeKind::Tool(spec) => NodeOutput::new().with_message(
-                        spec.result_port,
-                        RunMessage::tool(vec![ContentBlock::tool_result(
-                            "call",
-                            Some(spec.tool_name),
-                            json!({"ok": true}),
-                            false,
-                        )])?,
-                    ),
+                    NodeKind::Final => NodeResult::new(),
+                    NodeKind::Tool(spec) => {
+                        NodeResult::new().with_message(RunMessage::tool(vec![
+                            ContentBlock::tool_result(
+                                "call",
+                                Some(spec.tool_name),
+                                json!({"ok": true}),
+                                false,
+                            ),
+                        ])?)
+                    }
                     NodeKind::Agent(_) => {
                         if input
                             .optional
                             .get("tool_result")
                             .is_some_and(|matches| !matches.is_empty())
                         {
-                            NodeOutput::new().with_message("final", assistant_message("done"))
+                            NodeResult::new().with_message(assistant_message("done"))
                         } else {
-                            NodeOutput::new().with_message(
-                                "tool_calls",
-                                RunMessage::assistant(vec![ContentBlock::tool_call(
-                                    "call",
-                                    "tap",
-                                    json!({"x": 1}),
-                                )])?,
-                            )
+                            NodeResult::new().with_message(RunMessage::assistant(vec![
+                                ContentBlock::tool_call("call", "tap", json!({"x": 1})),
+                            ])?)
                         }
                     }
-                    _ => NodeOutput::new().with_message("out", assistant_message("ok")),
+                    _ => NodeResult::new().with_message(assistant_message("ok")),
                 };
                 Ok(output)
             })
@@ -1782,23 +1792,16 @@ mod tests {
     #[test]
     fn filtered_message_does_not_update_package() {
         let graph = GraphSpec::builder("filtered")
-            .node(
-                NodeSpec::new(
-                    "target",
-                    NodeKind::Final,
-                    InputPackageSpec::new("input").required(
-                        "instruction",
-                        MessageQuery::where_eq("metadata.kind", "instruction"),
-                        Cardinality::Latest,
-                    ),
-                )
-                .output("done"),
-            )
-            .edge(
-                "input_to_target",
-                ("input", "messages"),
-                ("target", "input"),
-            )
+            .node(NodeSpec::new(
+                "target",
+                NodeKind::Final,
+                InputPackageSpec::new("input").required(
+                    "instruction",
+                    MessageQuery::where_eq("metadata.kind", "instruction"),
+                    Cardinality::Latest,
+                ),
+            ))
+            .edge("input_to_target", "input", ("target", "input"))
             .finish_at("target")
             .build()
             .unwrap();
@@ -1825,22 +1828,15 @@ mod tests {
     #[test]
     fn any_update_is_required_latest_item() {
         let graph = GraphSpec::builder("any")
-            .node(
-                NodeSpec::final_node(
-                    "target",
-                    InputPackageSpec::new("input").required(
-                        "turn",
-                        MessageQuery::any(),
-                        Cardinality::Latest,
-                    ),
-                )
-                .output("done"),
-            )
-            .edge(
-                "input_to_target",
-                ("input", "messages"),
-                ("target", "input"),
-            )
+            .node(NodeSpec::final_node(
+                "target",
+                InputPackageSpec::new("input").required(
+                    "turn",
+                    MessageQuery::any(),
+                    Cardinality::Latest,
+                ),
+            ))
+            .edge("input_to_target", "input", ("target", "input"))
             .finish_at("target")
             .build()
             .unwrap();
@@ -1867,22 +1863,15 @@ mod tests {
         second.metadata.insert("ignored".to_string(), json!(2));
 
         let graph = GraphSpec::builder("selected")
-            .node(
-                NodeSpec::final_node(
-                    "target",
-                    InputPackageSpec::new("input").required(
-                        "text",
-                        MessageQuery::where_exists("content[*].text").select(["content[*].text"]),
-                        Cardinality::Latest,
-                    ),
-                )
-                .output("done"),
-            )
-            .edge(
-                "input_to_target",
-                ("input", "messages"),
-                ("target", "input"),
-            )
+            .node(NodeSpec::final_node(
+                "target",
+                InputPackageSpec::new("input").required(
+                    "text",
+                    MessageQuery::where_exists("content[*].text").select(["content[*].text"]),
+                    Cardinality::Latest,
+                ),
+            ))
+            .edge("input_to_target", "input", ("target", "input"))
             .finish_at("target")
             .build()
             .unwrap();
@@ -1934,11 +1923,7 @@ mod tests {
                         Cardinality::Latest,
                     ),
             ))
-            .edge(
-                "input_to_target",
-                ("input", "messages"),
-                ("target", "input"),
-            )
+            .edge("input_to_target", "input", ("target", "input"))
             .finish_at("target")
             .build()
             .unwrap();
@@ -1975,8 +1960,8 @@ mod tests {
             GraphRuntimeServices::new(Arc::new(RecordingExecutor::default())),
         );
         let input = runtime.graph.input.clone();
-        runtime.commit_output(&input, text_message("one"));
-        runtime.commit_output(&input, text_message("two"));
+        runtime.commit_message(&input, text_message("one"));
+        runtime.commit_message(&input, text_message("two"));
 
         runtime.scan_edges().unwrap();
         assert_eq!(runtime.ledger.transfers.len(), 2);
@@ -2302,6 +2287,7 @@ mod tests {
         assert!(selected.get("id").is_some());
         assert_eq!(selected["content[*].tool_name"], json!("tap"));
         assert!(selected.get("content[*].arguments").is_none());
+        assert_eq!(input.required_messages("call").len(), 1);
     }
 
     #[test]
@@ -2347,6 +2333,13 @@ mod tests {
         let blocks = selected.as_array().unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], json!("tool_call"));
+        let messages = input.required_messages("call");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content.len(), 1);
+        assert!(matches!(
+            &messages[0].content[0],
+            ContentBlock::ToolCall { .. }
+        ));
     }
 
     #[test]
@@ -2368,8 +2361,6 @@ mod tests {
                             Cardinality::Latest,
                         ),
                 )
-                .output("tool_calls")
-                .output("final")
                 .concurrency(NodeConcurrency::Serial),
             )
             .node(
@@ -2377,7 +2368,6 @@ mod tests {
                     "tap_tool",
                     "tap",
                     "tool_call",
-                    "results",
                     InputPackageSpec::new("calls").required(
                         "tool_call",
                         MessageQuery::where_eq("content[*].type", "tool_call"),
@@ -2394,22 +2384,10 @@ mod tests {
                     Cardinality::Latest,
                 ),
             ))
-            .edge(
-                "input_to_agent",
-                ("input", "messages"),
-                ("agent", "context"),
-            )
-            .edge(
-                "agent_to_tool",
-                ("agent", "tool_calls"),
-                ("tap_tool", "calls"),
-            )
-            .edge(
-                "tool_to_agent",
-                ("tap_tool", "results"),
-                ("agent", "context"),
-            )
-            .edge("agent_to_final", ("agent", "final"), ("final", "answer"))
+            .edge("input_to_agent", "input", ("agent", "context"))
+            .edge("agent_to_tool", "agent", ("tap_tool", "calls"))
+            .edge("tool_to_agent", "tap_tool", ("agent", "context"))
+            .edge("agent_to_final", "agent", ("final", "answer"))
             .finish_at("final")
             .build()
             .unwrap();
@@ -2474,12 +2452,12 @@ mod tests {
             node: NodeSpec,
             _input: NodeInput,
             _ctx: NodeExecutionContext,
-        ) -> BoxFuture<'static, AgentCoreResult<NodeOutput>> {
+        ) -> BoxFuture<'static, AgentCoreResult<NodeResult>> {
             Box::pin(async move {
                 if node.id == "slow" {
                     YieldOnce::new().await;
                 }
-                Ok(NodeOutput::new())
+                Ok(NodeResult::new())
             })
         }
     }
@@ -2510,8 +2488,8 @@ mod tests {
                 },
                 package(),
             ))
-            .edge("input_to_slow", ("input", "messages"), ("slow", "input"))
-            .edge("input_to_fast", ("input", "messages"), ("fast", "input"))
+            .edge("input_to_slow", "input", ("slow", "input"))
+            .edge("input_to_fast", "input", ("fast", "input"))
             .build()
             .unwrap();
 
@@ -2539,7 +2517,7 @@ mod tests {
             GraphRuntimeServices::new(Arc::new(RecordingExecutor::default())),
         );
         let input = runtime.graph.input.clone();
-        runtime.commit_output(&input, text_message("go"));
+        runtime.commit_message(&input, text_message("go"));
         runtime.scan_edges().unwrap();
         runtime.enqueue_ready_activations().unwrap();
         runtime.enqueue_ready_activations().unwrap();
@@ -2559,10 +2537,10 @@ mod tests {
             GraphRuntimeServices::new(Arc::new(RecordingExecutor::default())),
         );
         let input = runtime.graph.input.clone();
-        runtime.commit_output(&input, text_message("one"));
+        runtime.commit_message(&input, text_message("one"));
         runtime.scan_edges().unwrap();
         runtime.enqueue_ready_activations().unwrap();
-        runtime.commit_output(&input, text_message("two"));
+        runtime.commit_message(&input, text_message("two"));
         runtime.scan_edges().unwrap();
         runtime.enqueue_ready_activations().unwrap();
 
@@ -2611,7 +2589,7 @@ mod tests {
     }
 
     impl Future for TrackedFuture {
-        type Output = AgentCoreResult<NodeOutput>;
+        type Output = AgentCoreResult<NodeResult>;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             if !self.started {
@@ -2624,13 +2602,13 @@ mod tests {
                 return Poll::Pending;
             }
             self.probe.finish();
-            Poll::Ready(Ok(NodeOutput::new()))
+            Poll::Ready(Ok(NodeResult::new()))
         }
     }
 
     #[derive(Clone)]
     struct ConcurrencyExecutor {
-        source_outputs: Arc<BTreeMap<NodeId, RunMessage>>,
+        source_messages: Arc<BTreeMap<NodeId, RunMessage>>,
         probe: Arc<ConcurrencyProbe>,
     }
 
@@ -2640,9 +2618,9 @@ mod tests {
             node: NodeSpec,
             _input: NodeInput,
             _ctx: NodeExecutionContext,
-        ) -> BoxFuture<'static, AgentCoreResult<NodeOutput>> {
-            if let Some(message) = self.source_outputs.get(&node.id).cloned() {
-                return Box::pin(async move { Ok(NodeOutput::new().with_message("out", message)) });
+        ) -> BoxFuture<'static, AgentCoreResult<NodeResult>> {
+            if let Some(message) = self.source_messages.get(&node.id).cloned() {
+                return Box::pin(async move { Ok(NodeResult::new().with_message(message)) });
             }
             Box::pin(TrackedFuture {
                 probe: Arc::clone(&self.probe),
@@ -2671,29 +2649,26 @@ mod tests {
         for index in 0..keys.len() {
             let source = format!("source_{index}");
             builder = builder
-                .node(
-                    NodeSpec::new(
-                        source.clone(),
-                        NodeKind::Transform {
-                            executor: "source".to_string(),
-                            config: json!({}),
-                        },
-                        InputPackageSpec::new("input").required(
-                            "turn",
-                            MessageQuery::any(),
-                            Cardinality::Latest,
-                        ),
-                    )
-                    .output("out"),
-                )
+                .node(NodeSpec::new(
+                    source.clone(),
+                    NodeKind::Transform {
+                        executor: "source".to_string(),
+                        config: json!({}),
+                    },
+                    InputPackageSpec::new("input").required(
+                        "turn",
+                        MessageQuery::any(),
+                        Cardinality::Latest,
+                    ),
+                ))
                 .edge(
                     format!("input_to_{source}"),
-                    ("input", "messages"),
+                    "input",
                     (source.clone(), "input"),
                 )
                 .edge(
                     format!("{source}_to_target"),
-                    (source, "out"),
+                    source,
                     ("target".to_string(), "input"),
                 );
         }
@@ -2705,7 +2680,7 @@ mod tests {
         keys: &[&str],
     ) -> Arc<ConcurrencyProbe> {
         let graph = concurrency_graph(target_concurrency, keys);
-        let source_outputs = keys
+        let source_messages = keys
             .iter()
             .enumerate()
             .map(|(index, key)| {
@@ -2717,7 +2692,7 @@ mod tests {
             .collect();
         let probe = Arc::new(ConcurrencyProbe::default());
         let executor = ConcurrencyExecutor {
-            source_outputs: Arc::new(source_outputs),
+            source_messages: Arc::new(source_messages),
             probe: Arc::clone(&probe),
         };
         let output = run_with_executor(graph, vec![text_message("go")], Arc::new(executor));
@@ -2750,10 +2725,10 @@ mod tests {
     }
 
     #[test]
-    fn runtime_finishes_when_final_node_commits_output() {
-        let executor = TestExecutor::default().output(
+    fn runtime_finishes_when_final_node_commits_message() {
+        let executor = TestExecutor::default().result(
             "target",
-            NodeOutput::new().with_message("done", assistant_message("done")),
+            NodeResult::new().with_message(assistant_message("done")),
         );
         let output = run_with_executor(
             target_graph(InputPackageSpec::new("input").required(
@@ -2786,7 +2761,7 @@ mod tests {
                 )
                 .concurrency(NodeConcurrency::Parallel { max: 0 }),
             )
-            .edge("input_to_final", ("input", "messages"), ("final", "input"))
+            .edge("input_to_final", "input", ("final", "input"))
             .finish_at("final")
             .build()
             .unwrap();
@@ -2814,38 +2789,32 @@ mod tests {
     }
 
     #[test]
-    fn edge_scan_continues_after_node_output_commit() {
+    fn edge_scan_continues_after_node_message_commit() {
         let graph = GraphSpec::builder("chain")
-            .node(
-                NodeSpec::new(
+            .node(NodeSpec::new(
+                "first",
+                NodeKind::Transform {
+                    executor: "first".to_string(),
+                    config: json!({}),
+                },
+                InputPackageSpec::new("input").required(
+                    "turn",
+                    MessageQuery::any(),
+                    Cardinality::Latest,
+                ),
+            ))
+            .node(NodeSpec::new(
+                "second",
+                NodeKind::Transform {
+                    executor: "second".to_string(),
+                    config: json!({}),
+                },
+                InputPackageSpec::new("input").required(
                     "first",
-                    NodeKind::Transform {
-                        executor: "first".to_string(),
-                        config: json!({}),
-                    },
-                    InputPackageSpec::new("input").required(
-                        "turn",
-                        MessageQuery::any(),
-                        Cardinality::Latest,
-                    ),
-                )
-                .output("out"),
-            )
-            .node(
-                NodeSpec::new(
-                    "second",
-                    NodeKind::Transform {
-                        executor: "second".to_string(),
-                        config: json!({}),
-                    },
-                    InputPackageSpec::new("input").required(
-                        "first",
-                        MessageQuery::where_exists("content[*].text"),
-                        Cardinality::Latest,
-                    ),
-                )
-                .output("out"),
-            )
+                    MessageQuery::where_exists("content[*].text"),
+                    Cardinality::Latest,
+                ),
+            ))
             .node(NodeSpec::final_node(
                 "final",
                 InputPackageSpec::new("input").required(
@@ -2854,20 +2823,20 @@ mod tests {
                     Cardinality::Latest,
                 ),
             ))
-            .edge("input_to_first", ("input", "messages"), ("first", "input"))
-            .edge("first_to_second", ("first", "out"), ("second", "input"))
-            .edge("second_to_final", ("second", "out"), ("final", "input"))
+            .edge("input_to_first", "input", ("first", "input"))
+            .edge("first_to_second", "first", ("second", "input"))
+            .edge("second_to_final", "second", ("final", "input"))
             .finish_at("final")
             .build()
             .unwrap();
         let executor = TestExecutor::default()
-            .output(
+            .result(
                 "first",
-                NodeOutput::new().with_message("out", assistant_message("first")),
+                NodeResult::new().with_message(assistant_message("first")),
             )
-            .output(
+            .result(
                 "second",
-                NodeOutput::new().with_message("out", assistant_message("second")),
+                NodeResult::new().with_message(assistant_message("second")),
             );
 
         let output = run_with_executor(graph, vec![text_message("go")], Arc::new(executor));
@@ -2891,8 +2860,6 @@ mod tests {
                         .required("turn", user_turn_query(), Cardinality::Latest)
                         .optional("tool_result", tool_result_query(), Cardinality::Latest),
                 )
-                .output("tool_calls")
-                .output("final")
                 .concurrency(NodeConcurrency::Serial),
             )
             .node(
@@ -2900,7 +2867,6 @@ mod tests {
                     "tap_tool",
                     "tap",
                     "tool_call",
-                    "results",
                     InputPackageSpec::new("calls").required(
                         "tool_call",
                         MessageQuery::where_eq("content[*].type", "tool_call")
@@ -2918,22 +2884,10 @@ mod tests {
                     Cardinality::Latest,
                 ),
             ))
-            .edge(
-                "input_to_agent",
-                ("input", "messages"),
-                ("agent", "context"),
-            )
-            .edge(
-                "agent_to_tool",
-                ("agent", "tool_calls"),
-                ("tap_tool", "calls"),
-            )
-            .edge(
-                "tool_to_agent",
-                ("tap_tool", "results"),
-                ("agent", "context"),
-            )
-            .edge("agent_to_final", ("agent", "final"), ("final", "answer"))
+            .edge("input_to_agent", "input", ("agent", "context"))
+            .edge("agent_to_tool", "agent", ("tap_tool", "calls"))
+            .edge("tool_to_agent", "tap_tool", ("agent", "context"))
+            .edge("agent_to_final", "agent", ("final", "answer"))
             .finish_at("final")
             .build()
             .unwrap()
@@ -2969,43 +2923,49 @@ mod tests {
             node: NodeSpec,
             input: NodeInput,
             _ctx: NodeExecutionContext,
-        ) -> BoxFuture<'static, AgentCoreResult<NodeOutput>> {
+        ) -> BoxFuture<'static, AgentCoreResult<NodeResult>> {
             let mode = self.mode;
             if node.id == "agent" {
                 self.agent_inputs.lock().unwrap().push(input.clone());
             }
             Box::pin(async move {
                 match node.kind {
-                    NodeKind::Agent(_) => match mode {
-                        ReactMode::FinalOnly => Ok(NodeOutput::new()
-                            .with_message("final", assistant_message("final answer"))),
-                        ReactMode::InfiniteToolLoop => Ok(NodeOutput::new()
-                            .with_message("tool_calls", tool_call_message("loop-call", "tap"))),
-                        ReactMode::ToolOnly => Ok(NodeOutput::new()
-                            .with_message("tool_calls", tool_call_message("call", "tap"))),
-                        ReactMode::Normal | ReactMode::ToolError => {
-                            if input
-                                .optional
-                                .get("tool_result")
-                                .is_some_and(|matches| !matches.is_empty())
-                            {
-                                Ok(NodeOutput::new()
-                                    .with_message("final", assistant_message("final answer")))
-                            } else {
-                                Ok(NodeOutput::new()
-                                    .with_message("tool_calls", tool_call_message("call", "tap")))
+                    NodeKind::Agent(_) => {
+                        match mode {
+                            ReactMode::FinalOnly => {
+                                Ok(NodeResult::new()
+                                    .with_message(assistant_message("final answer")))
+                            }
+                            ReactMode::InfiniteToolLoop => Ok(NodeResult::new()
+                                .with_message(tool_call_message("loop-call", "tap"))),
+                            ReactMode::ToolOnly => Ok(
+                                NodeResult::new().with_message(tool_call_message("call", "tap"))
+                            ),
+                            ReactMode::Normal | ReactMode::ToolError => {
+                                if input
+                                    .optional
+                                    .get("tool_result")
+                                    .is_some_and(|matches| !matches.is_empty())
+                                {
+                                    Ok(NodeResult::new()
+                                        .with_message(assistant_message("final answer")))
+                                } else {
+                                    Ok(NodeResult::new()
+                                        .with_message(tool_call_message("call", "tap")))
+                                }
                             }
                         }
-                    },
+                    }
                     NodeKind::Tool(spec) => {
                         let is_error = matches!(mode, ReactMode::ToolError);
-                        Ok(NodeOutput::new().with_message(
-                            spec.result_port,
-                            tool_result_message("call", &spec.tool_name, is_error),
-                        ))
+                        Ok(NodeResult::new().with_message(tool_result_message(
+                            "call",
+                            &spec.tool_name,
+                            is_error,
+                        )))
                     }
-                    NodeKind::Final => Ok(NodeOutput::new()),
-                    _ => Ok(NodeOutput::new()),
+                    NodeKind::Final => Ok(NodeResult::new()),
+                    _ => Ok(NodeResult::new()),
                 }
             })
         }
@@ -3033,24 +2993,19 @@ mod tests {
     #[test]
     fn agent_tool_call_routes_only_to_tool_node() {
         let graph = GraphSpec::builder("tool_route")
-            .node(
-                NodeSpec::agent(
-                    "agent",
-                    "phone_agent",
-                    InputPackageSpec::new("context").required(
-                        "turn",
-                        user_turn_query(),
-                        Cardinality::Latest,
-                    ),
-                )
-                .output("tool_calls")
-                .output("final"),
-            )
+            .node(NodeSpec::agent(
+                "agent",
+                "phone_agent",
+                InputPackageSpec::new("context").required(
+                    "turn",
+                    user_turn_query(),
+                    Cardinality::Latest,
+                ),
+            ))
             .node(NodeSpec::tool(
                 "tap_tool",
                 "tap",
                 "tool_call",
-                "results",
                 InputPackageSpec::new("calls").required(
                     "tool_call",
                     MessageQuery::where_eq("content[*].type", "tool_call"),
@@ -3065,17 +3020,9 @@ mod tests {
                     Cardinality::Latest,
                 ),
             ))
-            .edge(
-                "input_to_agent",
-                ("input", "messages"),
-                ("agent", "context"),
-            )
-            .edge(
-                "agent_to_tool",
-                ("agent", "tool_calls"),
-                ("tap_tool", "calls"),
-            )
-            .edge("agent_to_final", ("agent", "final"), ("final", "answer"))
+            .edge("input_to_agent", "input", ("agent", "context"))
+            .edge("agent_to_tool", "agent", ("tap_tool", "calls"))
+            .edge("agent_to_final", "agent", ("final", "answer"))
             .build()
             .unwrap();
         let output = run_with_executor(
@@ -3173,7 +3120,7 @@ mod tests {
             node: NodeSpec,
             input: NodeInput,
             _ctx: NodeExecutionContext,
-        ) -> BoxFuture<'static, AgentCoreResult<NodeOutput>> {
+        ) -> BoxFuture<'static, AgentCoreResult<NodeResult>> {
             let fail_tool = self.fail_tool;
             Box::pin(async move {
                 match node.kind {
@@ -3186,13 +3133,14 @@ mod tests {
                             .unwrap();
                         let selected = &call.selected.value;
                         let call_id = selected["content[*].call_id"].as_str().unwrap();
-                        Ok(NodeOutput::new().with_message(
-                            spec.result_port,
-                            tool_result_message(call_id, &spec.tool_name, fail_tool),
-                        ))
+                        Ok(NodeResult::new().with_message(tool_result_message(
+                            call_id,
+                            &spec.tool_name,
+                            fail_tool,
+                        )))
                     }
-                    NodeKind::Final => Ok(NodeOutput::new()),
-                    _ => Ok(NodeOutput::new()),
+                    NodeKind::Final => Ok(NodeResult::new()),
+                    _ => Ok(NodeResult::new()),
                 }
             })
         }
@@ -3204,7 +3152,6 @@ mod tests {
                 "tap_tool",
                 "tap",
                 "tool_call",
-                "results",
                 InputPackageSpec::new("calls").required(
                     "tool_call",
                     MessageQuery::where_eq("content[*].type", "tool_call")
@@ -3220,23 +3167,15 @@ mod tests {
                     Cardinality::Latest,
                 ),
             ))
-            .edge(
-                "input_to_tool",
-                ("input", "messages"),
-                ("tap_tool", "calls"),
-            )
-            .edge(
-                "tool_to_final",
-                ("tap_tool", "results"),
-                ("final", "result"),
-            )
+            .edge("input_to_tool", "input", ("tap_tool", "calls"))
+            .edge("tool_to_final", "tap_tool", ("final", "result"))
             .finish_at("final")
             .build()
             .unwrap()
     }
 
     #[test]
-    fn tool_dispatcher_reads_call_item_and_emits_results_port() {
+    fn tool_dispatcher_reads_call_item_and_emits_tool_result_message() {
         let output = run_with_executor(
             tool_dispatch_graph(),
             vec![tool_call_message("call-123", "tap")],
@@ -3244,10 +3183,7 @@ mod tests {
         );
 
         assert_eq!(output.status, GraphRunStatus::Completed);
-        assert!(output
-            .state
-            .output_logs
-            .contains_key(&OutputRef::new("tap_tool", "results")));
+        assert!(output.state.message_logs.contains_key("tap_tool"));
     }
 
     #[test]
@@ -3257,11 +3193,7 @@ mod tests {
             vec![tool_call_message("call-123", "tap")],
             Arc::new(ToolDispatchExecutor { fail_tool: false }),
         );
-        let result = &output
-            .state
-            .output_logs
-            .get(&OutputRef::new("tap_tool", "results"))
-            .unwrap()[0]
+        let result = &output.state.message_logs.get("tap_tool").unwrap()[0]
             .message
             .content[0];
 
@@ -3278,11 +3210,7 @@ mod tests {
             vec![tool_call_message("call-err", "tap")],
             Arc::new(ToolDispatchExecutor { fail_tool: true }),
         );
-        let result = &output
-            .state
-            .output_logs
-            .get(&OutputRef::new("tap_tool", "results"))
-            .unwrap()[0]
+        let result = &output.state.message_logs.get("tap_tool").unwrap()[0]
             .message
             .content[0];
 
@@ -3338,21 +3266,18 @@ mod tests {
     #[test]
     fn deadline_exceeded_stops_new_activation() {
         let graph = GraphSpec::builder("deadline")
-            .node(
-                NodeSpec::new(
-                    "first",
-                    NodeKind::Transform {
-                        executor: "first".to_string(),
-                        config: json!({}),
-                    },
-                    InputPackageSpec::new("input").required(
-                        "turn",
-                        MessageQuery::any(),
-                        Cardinality::Latest,
-                    ),
-                )
-                .output("out"),
-            )
+            .node(NodeSpec::new(
+                "first",
+                NodeKind::Transform {
+                    executor: "first".to_string(),
+                    config: json!({}),
+                },
+                InputPackageSpec::new("input").required(
+                    "turn",
+                    MessageQuery::any(),
+                    Cardinality::Latest,
+                ),
+            ))
             .node(NodeSpec::final_node(
                 "second",
                 InputPackageSpec::new("input").required(
@@ -3361,14 +3286,14 @@ mod tests {
                     Cardinality::Latest,
                 ),
             ))
-            .edge("input_to_first", ("input", "messages"), ("first", "input"))
-            .edge("first_to_second", ("first", "out"), ("second", "input"))
+            .edge("input_to_first", "input", ("first", "input"))
+            .edge("first_to_second", "first", ("second", "input"))
             .finish_at("second")
             .build()
             .unwrap();
-        let executor = TestExecutor::default().output(
+        let executor = TestExecutor::default().result(
             "first",
-            NodeOutput::new().with_message("out", assistant_message("first")),
+            NodeResult::new().with_message(assistant_message("first")),
         );
         let output = block_on(
             GraphRuntime::new(graph, GraphRuntimeServices::new(Arc::new(executor)))
@@ -3416,8 +3341,8 @@ mod tests {
         assert_eq!(output.status, GraphRunStatus::Completed);
         assert!(output
             .state
-            .output_logs
-            .get(&OutputRef::new("tap_tool", "results"))
+            .message_logs
+            .get("tap_tool")
             .unwrap()
             .iter()
             .any(|entry| matches!(
@@ -3439,7 +3364,7 @@ mod tests {
         );
         let transfer = output.ledger.transfers.first().unwrap();
         assert_eq!(transfer.edge_id, "input_to_target");
-        assert_eq!(transfer.from, OutputRef::new("input", "messages"));
+        assert_eq!(transfer.from, "input");
         assert_eq!(transfer.to, PackageRef::new("target", "input"));
         assert_eq!(transfer.item, "turn");
         assert_ne!(transfer.selected_hash, 0);
@@ -3489,7 +3414,7 @@ mod tests {
             graph,
             GraphRuntimeServices::new(Arc::new(RecordingExecutor::default())),
         );
-        replay.state.output_logs = output.state.output_logs.clone();
+        replay.state.message_logs = output.state.message_logs.clone();
         replay.scan_edges().unwrap();
 
         let original = output
@@ -3528,8 +3453,8 @@ mod tests {
                     Cardinality::Latest,
                 ),
             ))
-            .edge("input_to_a", ("input", "messages"), ("a", "input"))
-            .edge("input_to_b", ("input", "messages"), ("b", "input"))
+            .edge("input_to_a", "input", ("a", "input"))
+            .edge("input_to_b", "input", ("b", "input"))
             .build()
             .unwrap();
         let run_once = || {

@@ -2,12 +2,10 @@ use agent_core::agent::{AgentRunInput, AgentRunStatus};
 use agent_core::agent_definition::{AgentDefinitionBuilder, ToolVisibility};
 use agent_core::assistant_builder::AssistantBuilder;
 use agent_core::content_block::{ContentBlock, DiagnosticLevel};
-use agent_core::context::{
-    message_value_to_input_items, run_message_to_input_items, ContextBuildInput, ContextBuilder,
-};
+use agent_core::context::{message_value_to_run_message, ContextBuildInput, ContextBuilder};
 use agent_core::event::{CoreEvent, EventLog};
 use agent_core::graph::Graph;
-use agent_core::graph_edge::{GraphEdge, OutputRef, PackageRef};
+use agent_core::graph_edge::{GraphEdge, PackageRef};
 use agent_core::graph_node::{
     Cardinality, GraphNode, InputPackageSpec, MessageQuery, NodeConcurrency, NodeKind,
 };
@@ -26,9 +24,7 @@ use agent_core::llm_model::{LlmApi, LlmModel, ModelId};
 use agent_core::llm_openai_responses::OpenAiResponsesProvider;
 use agent_core::llm_provider::{LlmProvider, PreparedLlmRequest, ProviderService};
 use agent_core::llm_registry::LlmRegistry;
-use agent_core::llm_request::{
-    LlmContentPart, LlmInputItem, LlmMessageRole, LlmRequest, LlmRequestOptions,
-};
+use agent_core::llm_request::{LlmRequest, LlmRequestOptions};
 use agent_core::llm_stream::{stream_from_events, LlmStreamEvent, LlmUsage};
 use agent_core::run_message::{MessageRole, MessageStatus, MessageUsage, RunMessage};
 use agent_core::session_compaction::{plan_active_branch_compaction, CompactionPlan};
@@ -49,14 +45,17 @@ use agent_core::tool_permissions::{
 use agent_core::tool_registry::ToolRegistry;
 use agent_core::tool_result::{ToolResult, ToolResultContent, ToolResultStatus};
 use agent_core::tool_schema::{validate_tool_name, ToolSchema};
-use agent_core::turn_loop::{TurnLoop, TurnLoopState};
+use agent_core::turn_loop::{
+    TurnContextPolicy, TurnEventHandlerFn, TurnGenInputFn, TurnGenInputResult, TurnLoop,
+    TurnLoopState, TurnPrepareGraphFn,
+};
 use agent_core::user_input;
 use agent_core::{AgentCoreError, AgentCoreResult, AgentDefinition, AgentFactory, AgentServices};
 use futures::executor::block_on;
 use futures::future::BoxFuture;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -143,14 +142,14 @@ impl graph_rt::NodeExecutor for ContractRuntimeExecutor {
         node: graph_rt::NodeSpec,
         _input: graph_rt::NodeInput,
         _ctx: graph_rt::NodeExecutionContext,
-    ) -> BoxFuture<'static, AgentCoreResult<graph_rt::NodeOutput>> {
+    ) -> BoxFuture<'static, AgentCoreResult<graph_rt::NodeResult>> {
         Box::pin(async move {
             let output = match node.kind {
-                graph_rt::NodeKind::Final => graph_rt::NodeOutput::new(),
+                graph_rt::NodeKind::Final => graph_rt::NodeResult::new(),
                 _ => {
                     let message = RunMessage::assistant(vec![ContentBlock::text("runtime")])?
                         .with_metadata("kind", json!(node.id.clone()));
-                    graph_rt::NodeOutput::new().with_message("out", message)
+                    graph_rt::NodeResult::new().with_message(message)
                 }
             };
             Ok(output)
@@ -178,7 +177,7 @@ fn passthrough_graph() -> AgentCoreResult<Graph> {
                 Cardinality::Latest,
             ),
         ))
-        .edge("input_to_final", ("input", "messages"), ("final", "input"))
+        .edge("input_to_final", "input", ("final", "input"))
         .finish_at("final")
         .build()
 }
@@ -322,6 +321,11 @@ fn tool_public_api_contract() -> AgentCoreResult<()> {
     );
     assert_eq!(result.to_run_message_value()["role"], "tool");
     assert_eq!(result.into_run_message()?.role, MessageRole::Tool);
+    let result_message = executor.execute_one_message(
+        &definition,
+        ToolCall::new("call-1m", "contract_read", json!({"query": "state"})),
+    )?;
+    assert_eq!(result_message.role, MessageRole::Tool);
 
     let batch = executor.execute_batch_parallel(
         &definition,
@@ -332,6 +336,17 @@ fn tool_public_api_contract() -> AgentCoreResult<()> {
     )?;
     assert_eq!(batch.len(), 2);
     assert_eq!(batch[0].call_id, "call-2");
+    let batch_messages = executor.execute_batch_parallel_messages(
+        &definition,
+        vec![
+            ToolCall::new("call-2m", "contract_read", json!({"query": "a"})),
+            ToolCall::new("call-3m", "contract_read", json!({"query": "b"})),
+        ],
+    )?;
+    assert_eq!(batch_messages.len(), 2);
+    assert!(batch_messages
+        .iter()
+        .all(|message| message.role == MessageRole::Tool));
 
     let denied = ToolResult::denied("call-4", "contract_read", "not allowed");
     let failed = ToolResult::failed("call-5", "contract_read", "boom", true);
@@ -387,7 +402,6 @@ fn graph_public_api_contract() -> AgentCoreResult<()> {
             Cardinality::Latest,
         ),
     )
-    .output("out")
     .concurrency(NodeConcurrency::Parallel { max: 2 });
     assert_eq!(observe.id(), "observe_screen");
     assert!(matches!(
@@ -406,8 +420,7 @@ fn graph_public_api_contract() -> AgentCoreResult<()> {
             instruction_query.clone(),
             Cardinality::Latest,
         ),
-    )
-    .output("out");
+    );
     let final_node = GraphNode::final_node(
         "final",
         InputPackageSpec::new("decision")
@@ -428,46 +441,26 @@ fn graph_public_api_contract() -> AgentCoreResult<()> {
             ),
     );
 
-    let edge = GraphEdge::new(
-        "observe_to_final",
-        ("observe_screen", "out"),
-        ("final", "decision"),
-    );
+    let edge = GraphEdge::new("observe_to_final", "observe_screen", ("final", "decision"));
     assert_eq!(edge.id(), "observe_to_final");
-    assert_eq!(edge.from(), &OutputRef::new("observe_screen", "out"));
+    assert_eq!(edge.from(), "observe_screen");
     assert_eq!(edge.to(), &PackageRef::new("final", "decision"));
 
     let graph = Graph::builder("graph_contract")
         .node(observe)
         .node(lookup)
         .node(final_node)
-        .edge(
-            "input_to_observe",
-            ("input", "messages"),
-            ("observe_screen", "task"),
-        )
-        .edge(
-            "input_to_lookup",
-            ("input", "messages"),
-            ("lookup_catalog", "task"),
-        )
-        .edge(
-            "lookup_to_final",
-            ("lookup_catalog", "out"),
-            ("final", "decision"),
-        )
-        .edge(
-            "observe_to_final",
-            ("observe_screen", "out"),
-            ("final", "decision"),
-        )
+        .edge("input_to_observe", "input", ("observe_screen", "task"))
+        .edge("input_to_lookup", "input", ("lookup_catalog", "task"))
+        .edge("lookup_to_final", "lookup_catalog", ("final", "decision"))
+        .edge("observe_to_final", "observe_screen", ("final", "decision"))
         .finish_at("final")
         .build()?;
     assert_eq!(graph.name(), "graph_contract");
     assert!(graph.node("observe_screen").is_some());
     assert_eq!(graph.nodes().len(), 3);
     assert_eq!(graph.edges().len(), 4);
-    assert_eq!(graph.input(), &OutputRef::new("input", "messages"));
+    assert_eq!(graph.input(), "input");
     assert_eq!(graph.finish_node(), Some("final"));
 
     let run_id = Uuid::new_v4();
@@ -497,23 +490,20 @@ fn graph_public_api_contract() -> AgentCoreResult<()> {
         .any(|event| matches!(event, CoreEvent::GraphStarted { .. })));
 
     let loop_graph = Graph::builder("bounded_loop")
-        .node(
-            GraphNode::new(
-                "loop",
-                NodeKind::Transform {
-                    executor: "loop".to_string(),
-                    config: json!({}),
-                },
-                InputPackageSpec::new("input").required(
-                    "turn",
-                    MessageQuery::any(),
-                    Cardinality::Latest,
-                ),
-            )
-            .output("out"),
-        )
-        .edge("input_to_loop", ("input", "messages"), ("loop", "input"))
-        .edge("loop_to_loop", ("loop", "out"), ("loop", "input"))
+        .node(GraphNode::new(
+            "loop",
+            NodeKind::Transform {
+                executor: "loop".to_string(),
+                config: json!({}),
+            },
+            InputPackageSpec::new("input").required(
+                "turn",
+                MessageQuery::any(),
+                Cardinality::Latest,
+            ),
+        ))
+        .edge("input_to_loop", "input", ("loop", "input"))
+        .edge("loop_to_loop", "loop", ("loop", "input"))
         .build()?;
     let no_progress = GraphRunner::with_executor(Arc::new(ContractRuntimeExecutor)).run(
         &loop_graph,
@@ -542,11 +532,7 @@ fn graph_public_api_contract() -> AgentCoreResult<()> {
                 graph_rt::Cardinality::Latest,
             ),
         ))
-        .edge(
-            "input_to_target",
-            ("input", "messages"),
-            ("target", "input"),
-        )
+        .edge("input_to_target", "input", ("target", "input"))
         .finish_at("target")
         .build()?;
     let runtime_output = block_on(
@@ -562,8 +548,8 @@ fn graph_public_api_contract() -> AgentCoreResult<()> {
     assert_eq!(runtime_output.ledger.transfers.len(), 1);
     assert_eq!(runtime_output.ledger.node_attempts[0].node, "target");
 
-    let package_edge = GraphEdge::new("package_edge", ("agent", "tool_calls"), ("tool", "calls"));
-    assert_eq!(package_edge.from.node, "agent");
+    let package_edge = GraphEdge::new("package_edge", "agent", ("tool", "calls"));
+    assert_eq!(package_edge.from, "agent");
     assert_eq!(package_edge.to.package, "calls");
     Ok(())
 }
@@ -773,8 +759,7 @@ fn message_input_event_and_context_public_api_contract() -> AgentCoreResult<()> 
     let mut context_input = ContextBuildInput::new(ModelId::new("contract-model"));
     context_input.api = Some("mock_api".to_string());
     context_input.instructions_override = Some("override".to_string());
-    context_input.replay_messages = vec![text_message.clone()];
-    context_input.run_messages = vec![assistant_message.clone()];
+    context_input.extend_messages([text_message.clone(), assistant_message.clone()]);
     context_input.visible_tool_schemas =
         vec![ToolSchema::empty_object("contract_read", "Read state")?];
     context_input.options = LlmRequestOptions {
@@ -794,65 +779,41 @@ fn message_input_event_and_context_public_api_contract() -> AgentCoreResult<()> 
     assert_eq!(llm_request.api.as_deref(), Some("mock_api"));
     assert_eq!(llm_request.instructions.as_deref(), Some("override"));
     assert_eq!(llm_request.tools.len(), 1);
-    assert!(llm_request.input.len() >= 2);
+    assert_eq!(llm_request.messages.len(), 2);
+    assert_eq!(llm_request.messages[1], assistant_message);
 
-    assert!(!run_message_to_input_items(&assistant_message, true)?.is_empty());
-    assert_eq!(
-        message_value_to_input_items(
-            &json!({
-                "role": "tool",
-                "content": [{
-                    "type": "tool_result",
-                    "call_id": "call-1",
-                    "tool_name": "contract_read",
-                    "output": {"ok": true}
-                }]
-            }),
-            false,
-        )?[0],
-        LlmInputItem::FunctionCallOutput {
-            call_id: "call-1".to_string(),
-            output: json!({"ok": true}),
-            is_error: false,
-        }
-    );
+    let parsed_message = message_value_to_run_message(&json!({
+        "id": Uuid::new_v4(),
+        "role": "tool",
+        "content": [{
+            "type": "tool_result",
+            "call_id": "call-1",
+            "tool_name": "contract_read",
+            "output": {"ok": true},
+            "is_error": false
+        }],
+        "status": "finalized",
+        "created_at_ms": 1
+    }))?;
+    assert_eq!(parsed_message.role, MessageRole::Tool);
 
     let mut direct_request = LlmRequest::new("contract-model");
     direct_request.instructions = Some("instructions".to_string());
-    direct_request.input.push(LlmInputItem::Message {
-        role: LlmMessageRole::User,
-        content: vec![
-            LlmContentPart::Text {
-                text: "hello".to_string(),
-            },
-            LlmContentPart::Reasoning {
-                text: "reason".to_string(),
-            },
-            LlmContentPart::Json { value: json!({}) },
-            LlmContentPart::ImageRef {
-                uri: "screen://current".to_string(),
-            },
-            LlmContentPart::FileRef {
-                uri: "file:///tmp/a.txt".to_string(),
-            },
-            LlmContentPart::Diagnostic {
-                message: "diag".to_string(),
-            },
-            LlmContentPart::Custom {
-                value: json!({"x": true}),
-            },
-        ],
-        metadata: BTreeMap::new(),
-    });
-    direct_request.input.push(LlmInputItem::FunctionCall {
-        call_id: "call-1".to_string(),
-        name: "contract_read".to_string(),
-        arguments: json!({}),
-    });
-    direct_request.input.push(LlmInputItem::Custom {
-        value: json!({"type": "custom"}),
-    });
+    direct_request.push_message(RunMessage::user(vec![
+        ContentBlock::text("hello"),
+        ContentBlock::reasoning("reason"),
+        ContentBlock::image_reference("screen://current", None, None),
+        ContentBlock::file_reference("file:///tmp/a.txt", None, None),
+        ContentBlock::diagnostic(DiagnosticLevel::Info, "diag"),
+        ContentBlock::custom(json!({"x": true})),
+    ])?);
+    direct_request.push_message(RunMessage::assistant_tool_call(
+        "call-1",
+        "contract_read",
+        json!({}),
+    )?);
     assert_eq!(direct_request.model, ModelId::from("contract-model"));
+    assert_eq!(direct_request.messages.len(), 2);
 
     Ok(())
 }
@@ -883,13 +844,7 @@ fn llm_provider_and_registry_public_api_contract() -> AgentCoreResult<()> {
     let openai_model = OpenAiResponsesProvider::default_model("gpt-contract");
     assert_eq!(openai_model.api.as_key(), "openai_responses");
     let mut openai_request = LlmRequest::new("gpt-contract");
-    openai_request.input.push(LlmInputItem::Message {
-        role: LlmMessageRole::User,
-        content: vec![LlmContentPart::Text {
-            text: "hello".to_string(),
-        }],
-        metadata: BTreeMap::new(),
-    });
+    openai_request.push_message(RunMessage::user_text("hello")?);
     let openai = OpenAiResponsesProvider::new().with_endpoint("http://127.0.0.1/responses");
     let prepared_openai = openai.prepare_request(&openai_request)?;
     assert_eq!(prepared_openai.endpoint, "http://127.0.0.1/responses");
@@ -909,13 +864,7 @@ fn llm_provider_and_registry_public_api_contract() -> AgentCoreResult<()> {
         .with_endpoint("http://127.0.0.1/chat")
         .with_api_key("fixture-key");
     let mut chat_request = LlmRequest::new("deepseek-contract");
-    chat_request.input.push(LlmInputItem::Message {
-        role: LlmMessageRole::User,
-        content: vec![LlmContentPart::Text {
-            text: "hello".to_string(),
-        }],
-        metadata: BTreeMap::new(),
-    });
+    chat_request.push_message(RunMessage::user_text("hello")?);
     let prepared_chat = deepseek.prepare_request(&chat_request)?;
     assert_eq!(
         prepared_chat.headers.get("Authorization"),
@@ -965,25 +914,65 @@ fn llm_provider_and_registry_public_api_contract() -> AgentCoreResult<()> {
 
 #[test]
 fn session_turn_and_error_public_api_contract() -> AgentCoreResult<()> {
-    let mut turn_loop = TurnLoop::new();
+    let loop_graph = Graph::builder("turn_loop_contract")
+        .node(GraphNode::final_node(
+            "final",
+            InputPackageSpec::new("input").required(
+                "turn",
+                MessageQuery::where_eq("role", "user"),
+                Cardinality::Latest,
+            ),
+        ))
+        .edge("input_to_final", "input", ("final", "input"))
+        .finish_at("final")
+        .build()?;
+
+    let seen_events = Arc::new(Mutex::new(0usize));
+    let seen_events_for_handler = Arc::clone(&seen_events);
+    let on_events: TurnEventHandlerFn = Arc::new(move |batch| {
+        *seen_events_for_handler.lock().unwrap() += batch.events.len();
+        Ok(())
+    });
+    let mut turn_loop = TurnLoop::new()
+        .with_graph(loop_graph.clone())
+        .with_context_policy(TurnContextPolicy::LastMessages(1))
+        .with_on_turn_events(on_events);
     assert_eq!(turn_loop.state(), TurnLoopState::Idle);
-    let turn_message = user_input::text_message("run turn")?;
-    turn_loop.submit_user_message(turn_message.clone())?;
-    assert_eq!(turn_loop.buffer_len(), 1);
-    let turn = turn_loop.prepare_turn()?.expect("turn should be ready");
-    assert_eq!(turn.user_message, turn_message);
-    assert_eq!(turn_loop.active_turn_id(), Some(turn.turn_id));
-    assert_eq!(turn_loop.state(), TurnLoopState::Running);
-    turn_loop.finish_turn(turn.turn_id)?;
-    assert_eq!(turn_loop.state(), TurnLoopState::Idle);
+    turn_loop.append_messages([RunMessage::assistant_text("restored context")?])?;
+    assert!(turn_loop.push(user_input::text_message("run graph")?)?);
+    assert_eq!(turn_loop.pending_len(), 1);
+
+    let loop_run = turn_loop.run_once()?.expect("turn should run");
+    assert_eq!(loop_run.graph.status, GraphRunStatus::Completed);
+    assert_eq!(loop_run.context_messages.len(), 2);
+    assert_eq!(turn_loop.messages().len(), 2);
+    assert_eq!(turn_loop.pending_len(), 0);
+    assert!(*seen_events.lock().unwrap() > 0);
+
+    let fast_graph = loop_graph.clone();
+    let prepare_graph: TurnPrepareGraphFn = Arc::new(move |_turn| Ok(fast_graph.clone()));
+    let gen_input: TurnGenInputFn = Arc::new(|input| {
+        let first = input.pending_items.first().unwrap().clone();
+        let remaining = input.pending_items.iter().skip(1).cloned().collect();
+        Ok(TurnGenInputResult::new(vec![first.clone()], vec![first.id]).with_remaining(remaining))
+    });
+    let mut queued_loop = TurnLoop::new()
+        .with_prepare_graph(prepare_graph)
+        .with_gen_input(gen_input);
+    queued_loop.push(user_input::text_message("first queued")?)?;
+    queued_loop.push(user_input::text_message("second queued")?)?;
+    let queued_turns = queued_loop.run_pending()?;
+    assert_eq!(queued_turns.len(), 2);
+    assert_eq!(queued_loop.messages().len(), 2);
+
     turn_loop.request_stop();
     assert!(turn_loop.stop_requested());
+    assert!(!turn_loop.push(user_input::text_message("late turn")?)?);
+    assert_eq!(turn_loop.late_items().len(), 1);
+    assert_eq!(turn_loop.take_late_items().len(), 1);
     turn_loop.clear_stop();
     assert!(!turn_loop.stop_requested());
-    turn_loop.submit_user_message(user_input::text_message("abort turn")?)?;
-    let abort_turn = turn_loop.prepare_turn()?.unwrap();
-    turn_loop.abort_turn(abort_turn.turn_id)?;
-    assert_eq!(turn_loop.state(), TurnLoopState::Stopped);
+    assert_eq!(turn_loop.state(), TurnLoopState::Idle);
 
     let session_id = Uuid::new_v4();
     let header = SessionEntry::header(session_id);
@@ -1059,7 +1048,7 @@ fn session_turn_and_error_public_api_contract() -> AgentCoreResult<()> {
 
     let result_alias: AgentCoreResult<()> = Ok(());
     assert!(result_alias.is_ok());
-    let errors = vec![
+    let errors = [
         AgentCoreError::InvalidInput("input".to_string()),
         AgentCoreError::InvalidConfig("config".to_string()),
         AgentCoreError::NotFound("missing".to_string()),

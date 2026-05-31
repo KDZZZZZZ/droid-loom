@@ -11,7 +11,7 @@ use crate::event::CoreEvent;
 use crate::graph::Graph;
 use crate::graph_runtime::{
     self as rt, GraphRunLedger, GraphRuntime, GraphRuntimeServices, GraphRuntimeState,
-    NodeExecutionContext, NodeExecutor, NodeInput, NodeKind, NodeOutput,
+    NodeExecutionContext, NodeExecutor, NodeInput, NodeKind, NodeResult,
 };
 use crate::run_message::RunMessage;
 
@@ -205,7 +205,7 @@ fn core_events_from_runtime(
             node_id: attempt.node.clone(),
         });
         for entry in state
-            .output_logs
+            .message_logs
             .values()
             .flat_map(|entries| entries.iter())
             .filter(|entry| entry.node == attempt.node)
@@ -220,7 +220,7 @@ fn core_events_from_runtime(
             run_id,
             node_id: attempt.node.clone(),
             emitted_messages: state
-                .output_logs
+                .message_logs
                 .values()
                 .flat_map(|entries| entries.iter())
                 .filter(|entry| entry.node == attempt.node)
@@ -239,10 +239,10 @@ impl NodeExecutor for DefaultNodeExecutor {
         node: rt::NodeSpec,
         _input: NodeInput,
         _ctx: NodeExecutionContext,
-    ) -> BoxFuture<'static, AgentCoreResult<NodeOutput>> {
+    ) -> BoxFuture<'static, AgentCoreResult<NodeResult>> {
         Box::pin(async move {
             match node.kind {
-                NodeKind::Final | NodeKind::Transform { .. } => Ok(NodeOutput::new()),
+                NodeKind::Final | NodeKind::Transform { .. } => Ok(NodeResult::new()),
                 NodeKind::Agent(spec) => Err(AgentCoreError::InvalidConfig(format!(
                     "agent node `{}` requires a GraphRunner executor",
                     spec.agent_name
@@ -280,17 +280,13 @@ mod tests {
             node: rt::NodeSpec,
             _input: NodeInput,
             _ctx: NodeExecutionContext,
-        ) -> BoxFuture<'static, AgentCoreResult<NodeOutput>> {
+        ) -> BoxFuture<'static, AgentCoreResult<NodeResult>> {
             Box::pin(async move {
                 match node.kind {
-                    NodeKind::Final => Ok(NodeOutput::new()),
-                    _ => Ok(NodeOutput::new().with_message(
-                        "out",
-                        RunMessage::assistant(vec![ContentBlock::text(format!(
-                            "{} output",
-                            node.id
-                        ))])?,
-                    )),
+                    NodeKind::Final => Ok(NodeResult::new()),
+                    _ => Ok(NodeResult::new().with_message(RunMessage::assistant(vec![
+                        ContentBlock::text(format!("{} output", node.id)),
+                    ])?)),
                 }
             })
         }
@@ -307,7 +303,7 @@ mod tests {
                     Cardinality::Latest,
                 ),
             ))
-            .edge("input_to_final", ("input", "messages"), ("final", "input"))
+            .edge("input_to_final", "input", ("final", "input"))
             .finish_at("final")
             .build()
             .unwrap();
@@ -328,21 +324,18 @@ mod tests {
     #[test]
     fn runner_uses_custom_executor_for_agent_or_tool_nodes() {
         let graph = Graph::builder("test")
-            .node(
-                GraphNode::new(
-                    "source",
-                    NodeKind::Transform {
-                        executor: "emit".to_string(),
-                        config: json!({}),
-                    },
-                    InputPackageSpec::new("input").required(
-                        "turn",
-                        MessageQuery::any(),
-                        Cardinality::Latest,
-                    ),
-                )
-                .output("out"),
-            )
+            .node(GraphNode::new(
+                "source",
+                NodeKind::Transform {
+                    executor: "emit".to_string(),
+                    config: json!({}),
+                },
+                InputPackageSpec::new("input").required(
+                    "turn",
+                    MessageQuery::any(),
+                    Cardinality::Latest,
+                ),
+            ))
             .node(GraphNode::final_node(
                 "final",
                 InputPackageSpec::new("done").required(
@@ -351,12 +344,8 @@ mod tests {
                     Cardinality::Latest,
                 ),
             ))
-            .edge(
-                "input_to_source",
-                ("input", "messages"),
-                ("source", "input"),
-            )
-            .edge("source_to_final", ("source", "out"), ("final", "done"))
+            .edge("input_to_source", "input", ("source", "input"))
+            .edge("source_to_final", "source", ("final", "done"))
             .finish_at("final")
             .build()
             .unwrap();
@@ -394,6 +383,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.status, GraphRunStatus::Cancelled);
-        assert!(result.state.output_logs.is_empty());
+        assert!(result.state.message_logs.is_empty());
     }
 }

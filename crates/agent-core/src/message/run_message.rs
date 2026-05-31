@@ -81,12 +81,39 @@ impl RunMessage {
         Self::new(MessageRole::User, content)
     }
 
+    pub fn user_text(text: impl Into<String>) -> AgentCoreResult<Self> {
+        Self::user(vec![ContentBlock::text(text)])
+    }
+
     pub fn assistant(content: Vec<ContentBlock>) -> AgentCoreResult<Self> {
         Self::new(MessageRole::Assistant, content)
     }
 
+    pub fn assistant_text(text: impl Into<String>) -> AgentCoreResult<Self> {
+        Self::assistant(vec![ContentBlock::text(text)])
+    }
+
+    pub fn assistant_tool_call(
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        arguments: Value,
+    ) -> AgentCoreResult<Self> {
+        Self::assistant(vec![ContentBlock::tool_call(call_id, tool_name, arguments)])
+    }
+
     pub fn tool(content: Vec<ContentBlock>) -> AgentCoreResult<Self> {
         Self::new(MessageRole::Tool, content)
+    }
+
+    pub fn tool_result(
+        call_id: impl Into<String>,
+        tool_name: Option<String>,
+        output: Value,
+        is_error: bool,
+    ) -> AgentCoreResult<Self> {
+        Self::tool(vec![ContentBlock::tool_result(
+            call_id, tool_name, output, is_error,
+        )])
     }
 
     pub fn diagnostic(content: Vec<ContentBlock>) -> AgentCoreResult<Self> {

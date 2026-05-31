@@ -1,4 +1,4 @@
-# Public API Meaning Audit
+﻿# Public API Meaning Audit
 
 Date: 2026-05-31
 
@@ -21,9 +21,9 @@ The graph API was refactored after this audit:
 
 - old activation-condition graph state was removed from the public surface;
 - `Graph` now aliases the package graph runtime spec;
-- edge semantics are output-port routing plus input-package filtering;
+- edge semantics are source-node message routing plus input-package filtering;
 - node execution is async through `NodeExecutor`;
-- tick budget is configured on `GraphRunInput`.
+- tick budget is configured through `TurnLoop::with_max_ticks()` on the public path and passed to the internal graph run.
 
 No real API key is required or recorded by these checks.
 
@@ -58,8 +58,8 @@ Guarded extension points are still meaningful when the behavior is explicit and 
 | `AgentDefinition` | Stores immutable agent identity, prompt, and per-tool visibility. | Runtime configuration read by registry and agent factory. |
 | `ToolVisibility` | Controls direct, searchable, or hidden tool access. | Enforced by `ToolRegistry::get_for_agent`, `direct_schemas`, and search. |
 | `AgentFactory` | Validates definition and attaches `AgentServices`. | Prevents invalid agents from running. |
-| `Agent` | Owns an id, definition, services, and cancellation flag; delegates runs to `GraphRunner`. | Runtime execution entry. |
-| `AgentRunResult` | Carries run id, messages, events, status, and error. | Observable result surface. |
+| `Agent` | Owns an id, definition, services, and cancellation flag; lower-level run support is still available for advanced adapters. | Agent identity and advanced run wrapper. |
+| `AgentRunResult` | Carries run id, messages, events, status, and error for the advanced agent run path. | Advanced observable result surface. |
 | `AgentRunStatus` | Maps graph status into agent-level completed, cancelled, or failed. | Stable status contract. |
 
 Evidence:
@@ -99,18 +99,18 @@ Notes:
 
 | API | How it works | Meaning |
 | --- | --- | --- |
-| `Graph` | Validates node specs, package edges, graph input ref, and optional finish node. | Runtime graph template. |
+| `Graph` | Validates node specs, package edges, graph input node, and optional finish node. | Runtime graph template. |
 | `GraphNode` | Public alias for `NodeSpec`; describes transform, tool, agent, graph, or final node. | Unit of graph execution. |
-| `GraphEdge` | Routes `(node, output_port)` output log entries into `(node, input_package)`. | Message/content routing. |
+| `GraphEdge` | Routes source node message log entries into `(node, input_package)`. | Message/content routing. |
 | `InputPackageSpec` | Defines required and optional package items for a node. | Context inheritance and unlock condition. |
 | `MessageQuery` | Filters messages and selected fields before package insertion. | Prevents noise inheritance and duplicate updates. |
-| `NodeOutput` | Lets executor emit messages on named output ports. | Output fan-out and branch routing. |
+| `NodeResult` | Lets executor return messages produced by a node. | Node message emission. |
 | `NodeConcurrency` | Limits serial, parallel, or per-key node activations. | Runtime scheduling guard. |
 | `NodeExecutor` | Async executor for transform/tool/agent/graph/final node kinds. | Runtime extension point. |
-| `AgentRunInput` | Carries graph, initial messages, optional run id, and stop request into `Agent::run`. | Agent run input contract. |
-| `GraphRunner` | Synchronous facade over async `GraphRuntime`; records state, ledger, events, and status. | Core graph runtime. |
-| `GraphRunInput` | Carries graph run id, initial messages, stop request, and max ticks. | Direct runner input contract. |
-| `GraphRunResult` | Carries graph messages, events, runtime state, ledger, status, and error. | Observable graph result. |
+| `AgentRunInput` | Carries graph, initial messages, optional run id, and stop request into the advanced `Agent::run` path. | Advanced agent run input contract. |
+| `GraphRunner` | Synchronous facade over async `GraphRuntime`; used internally by `TurnLoop` and by low-level tests/adapters. | Internal/advanced graph runtime facade. |
+| `GraphRunInput` | Carries graph run id, initial messages, stop request, and max ticks for the runner. | Internal/advanced runner input contract. |
+| `GraphRunResult` | Carries graph messages, events, runtime state, ledger, status, and error; normally read through `TurnRunResult.graph`. | Observable graph result under the turn loop. |
 | `GraphRunStatus` | Reports completed, drained, cancelled, budget exceeded, or failed. | Stable graph status contract. |
 
 Evidence:
@@ -181,9 +181,9 @@ Evidence:
 | API | How it works | Meaning |
 | --- | --- | --- |
 | `AssistantBuilder` | Coalesces text/reasoning deltas and appends tool calls/diagnostics before finalizing. | Streaming assistant message builder. |
-| `ContextBuildInput` | Carries model, replay messages, run messages, tool schemas, options, and metadata. | Context build input. |
+| `ContextBuildInput` | Carries model, `RunMessage` messages, tool schemas, options, and metadata. | Context build input. |
 | `ContextBuilder` | Converts core messages and tool schemas into provider-neutral `LlmRequest`. | Provider-neutral context compiler. |
-| `LlmRequest` | Carries model, instructions, input items, tools, options, metadata, and headers. | Provider adapter input. |
+| `LlmRequest` | Carries model, instructions, `RunMessage` messages, tools, options, metadata, and headers. | Provider adapter input. |
 
 Evidence:
 
@@ -195,7 +195,12 @@ Evidence:
 
 | API | How it works | Meaning |
 | --- | --- | --- |
-| `TurnLoop` | Buffers user messages, prepares one active turn, finishes/aborts turns, and handles stop state. | Turn lifecycle guard. |
+| `TurnLoop` | Buffers pushed messages, calls GenInput, prepares a graph, runs it, dispatches turn events, appends only newly emitted messages, and handles stop/late items. | Primary Eino-style turn loop entry. |
+| `TurnGenInputFn` | Converts pending items plus history into graph input, consumed ids, and remaining items. | Per-turn input builder. |
+| `TurnPrepareGraphFn` | Selects the graph for a generated turn. | Graph equivalent of Eino PrepareAgent. |
+| `TurnEventHandlerFn` | Observes graph events and newly appended messages for a turn. | Event sink equivalent of Eino OnAgentEvents. |
+| `TurnContextPolicy` | Selects FullHistory, LatestUserOnly, or LastMessages for the default GenInput. | Context inheritance rule for every graph start. |
+| `TurnRunResult` | Carries turn id, consumed/remaining items, graph context snapshot, appended messages, and graph result. | Observable turn result surface. |
 | `SessionEntry` | Stores session header, finalized message, or compaction entry. | Persistent session entry. |
 | `InMemorySessionStore` | Appends entries and rebuilds a `SessionTree`. | Local store implementation. |
 | `SessionStore` | Defines append, entries, and default `load_tree`. | Storage extension point. |
@@ -216,7 +221,8 @@ Evidence:
 | --- | --- | --- |
 | `Agent::cancel` | Sets the agent cancellation flag. | Agent-level stop signal. |
 | `Agent::cancellation_token` | Reads the cancellation flag without owning the agent. | Stop observation handle. |
-| `AgentRunInput::with_stop_requested` | Requests cancellation for one run. | Per-run stop signal. |
+| `TurnLoop::request_stop` | Stops accepting new turn runs until `clear_stop()`. | Public turn-level stop signal. |
+| `AgentRunInput::with_stop_requested` | Requests cancellation for one advanced agent run. | Advanced per-run stop signal. |
 
 Evidence:
 

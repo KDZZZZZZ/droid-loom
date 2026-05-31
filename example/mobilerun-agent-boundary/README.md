@@ -65,7 +65,7 @@ cargo run -p mobilerun-agent-boundary
 
 定义 tool：
 
-实现 `agent_core::tool::Tool`，返回 `ToolMetadata` 和 `ToolOutput`，再注册到 `ToolRegistry`。常用工具设置为 `Direct`，不常用工具设置为 `Searchable`，危险或内部工具设置为 `Hidden`。调用方用 `ToolExecutor` 执行，结果用 `ToolResult::into_run_message()` 回传给模型。
+实现 `agent_core::tool::Tool`，返回 `ToolMetadata` 和 `ToolOutput`，再注册到 `ToolRegistry`。常用工具设置为 `Direct`，不常用工具设置为 `Searchable`，危险或内部工具设置为 `Hidden`。调用方用 `ToolExecutor::execute_*_message(s)` 执行，结果会自动包装成 `RunMessage(role=tool)` 回传给模型。
 
 本示例的工具可见性约定：
 
@@ -79,7 +79,7 @@ cargo run -p mobilerun-agent-boundary
 
 会话级入口：
 
-Mobilerun 的 `send_user_message` 可以映射为“先包装 `RunMessage(role=user)`，再提交给 `TurnLoop`”。本示例通过 `TurnLoop::submit_user_message()`、`prepare_turn()` 和 `finish_turn()` 验证 Ready -> Running -> Idle 的基本生命周期。`TurnLoop` 不执行 graph，也不写 session。
+Mobilerun 的 `send_user_message` 映射为“包装 `RunMessage(role=user)`，交给 `TurnLoop::run_message()` 启动本轮 graph”。本示例验证 graph run -> append new messages -> Idle 的生命周期；调用方不直接使用 `GraphRunner` 作为常规入口。
 
 构建 provider request：
 
@@ -91,7 +91,7 @@ Mobilerun 的 `send_user_message` 可以映射为“先包装 `RunMessage(role=u
 
 - 对高概率且只读幂等的 `ui_state`、`search_database` 做预执行，并把结果继续包装成 tool message。
 - 把高频工具放入 hot/direct 层，把低频工具放入 dynamic/searchable 层。
-- 用 `ToolExecutor::execute_batch_parallel()` 验证并行工具调用，并保持结果顺序。
+- 用 `ToolExecutor::execute_batch_parallel_messages()` 验证并行工具调用，并保持 result message 顺序。
 
 Task 绑定上下文：
 
@@ -136,7 +136,7 @@ Mobilerun-style streaming event 可以由 `CoreEvent` 投影出来。本示例�
 
 终止 graph：
 
-调用 `AgentRunInput::with_stop_requested(true)` 可在启动前取消；运行中的取消由 `Agent::cancel()` 和 cancellation token 表达。循环保护通过 `GraphRunInput::with_max_ticks()` 或 agent runner 的默认 tick budget 生效。
+调用 `TurnLoop::request_stop()` 可阻止新 turn 启动；循环保护通过 `TurnLoop::with_max_ticks()` 或 `set_max_ticks()` 传给内部 graph run 生效。更底层的 agent/graph 取消能力只作为高级集成接口保留。
 
 ## 可拓展点
 

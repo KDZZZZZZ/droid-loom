@@ -20,7 +20,7 @@
 
 | Mobilerun 能力 | 当前表达方式 | 示例证据 | 状态 |
 | --- | --- | --- | --- |
-| `reasoning=False` 走 FastAgent | `Graph` 中的 `mobilerun_fast_turn`，由一个 agent turn 直接产出 tool calls | `graph runner - status=completed` | supported |
+| `reasoning=False` 走 FastAgent | `Graph` 中的 `mobilerun_fast_turn`，由 `TurnLoop` 启动一个 agent turn 直接产出 tool calls | `turn loop graph - status=completed` | supported |
 | `reasoning=True` 走 Manager/Executor | `Graph` 中的 `manager_plan -> executor_action -> manager_check` | `reasoning manager/executor graph - status=completed` | supported |
 | `goal` | `MobileRunLikeConfig.goal` 渲染进 user prompt | `message and content blocks`、`context builder` | supported |
 | `prompts` 覆盖 | `PromptSet.fast_system`、`PromptSet.reasoning_system`、`PromptSet.user_task` | `agent definition` 同时构建 fast/reasoning definition | supported |
@@ -34,7 +34,7 @@
 | UI state observation | `ui_state` tool 返回 mock element list | `cover-ui` tool call 成功执行 | simulated |
 | App 地图记忆 | `AppMapMemory` 从 `ui_state` 维护页面节点、路径、局部视野、语义搜索、forget 和候选 action | `app map memory - pages=4, transitions=3` | supported |
 | 百步级跨 App 连续任务 | `cross_app_task.rs` 用地图路径在 Shop/Notes/Calendar/Mail 之间自动执行 100+ 工具动作 | `hundred-step cross-app task - completed=true, steps=122` | simulated |
-| `send_user_message` | `user_input` 包装消息，再 `TurnLoop::submit_user_message()` 入队 | `turn loop input queue - after_submit=Ready` | supported |
+| `send_user_message` | `user_input` 包装消息，再由 `TurnLoop::run_message()` 启动 graph 并追加新消息 | `turn loop entry - graph_status=completed` | supported |
 | `run_event_stream()` | `CoreEvent` + `EventLog` 投影成 Mobilerun-style event kind | `event stream projection - tool_events=16` | simulated |
 | `ToolExecutionEvent` | `HookEmitted(name="tool_execution")` 投影 | `event stream projection - tool_events=16` | simulated |
 | recoverable provider/tool error | wrapper handler 返回 `WrapperResult::Recover { messages }` | `handler hooks - recover_messages=1` | supported |
@@ -60,7 +60,7 @@
 | 地图局部视野降耗 | `local_view()` 只给当前页面附近几跳和任务相关入口，不把整图塞进 prompt | `local_map_tokens=12913 vs full_map_tokens=45140` | supported |
 | 地图动态维护 | 路径失败多次后标记 stale，`forget()` 可按 query/page/stale 删除 | `stale_paths_after_failures=1`, `forget_removed=1` | supported |
 | 复杂图验证 | task/dependency package 解锁两个并行工具 node，fan-in 到 manager package 后完成 final node | `complex task graph - status=completed` | supported |
-| 并行工具调用 | `ToolExecutor::execute_batch_parallel()` 并行执行且保持结果顺序 | `parallel tool execution - parallel_results=2` | supported |
+| 并行工具调用 | `ToolExecutor::execute_batch_parallel_messages()` 并行执行且保持 result message 顺序 | `parallel tool execution - parallel_results=2` | supported |
 
 ## 使用方案
 
@@ -81,7 +81,7 @@ cargo test -p mobilerun-agent-boundary
 - `registered 17/17 mocked action tools`
 - `executed 16/16 visible tools`
 - `recover_messages=1`
-- `turn loop input queue - after_submit=Ready`
+- `turn loop entry - graph_status=completed`
 - `event stream projection - ... tool_events=16`
 - `reasoning manager/executor graph - status=completed`
 - `trajectory probability graph - session_branches=3`

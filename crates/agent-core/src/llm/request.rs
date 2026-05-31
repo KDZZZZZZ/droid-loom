@@ -1,4 +1,5 @@
 use crate::llm_model::ModelId;
+use crate::run_message::RunMessage;
 use crate::tool_schema::ToolSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,7 +13,7 @@ pub struct LlmRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub input: Vec<LlmInputItem>,
+    pub messages: Vec<RunMessage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolSchema>,
     #[serde(default)]
@@ -29,12 +30,20 @@ impl LlmRequest {
             model: model.into(),
             api: None,
             instructions: None,
-            input: Vec::new(),
+            messages: Vec::new(),
             tools: Vec::new(),
             options: LlmRequestOptions::default(),
             metadata: BTreeMap::new(),
             headers: BTreeMap::new(),
         }
+    }
+
+    pub fn push_message(&mut self, message: RunMessage) {
+        self.messages.push(message);
+    }
+
+    pub fn extend_messages(&mut self, messages: impl IntoIterator<Item = RunMessage>) {
+        self.messages.extend(messages);
     }
 }
 
@@ -50,51 +59,4 @@ pub struct LlmRequestOptions {
     pub store: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_response_id: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
-pub enum LlmInputItem {
-    Message {
-        role: LlmMessageRole,
-        content: Vec<LlmContentPart>,
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        metadata: BTreeMap<String, Value>,
-    },
-    FunctionCall {
-        call_id: String,
-        name: String,
-        arguments: Value,
-    },
-    FunctionCallOutput {
-        call_id: String,
-        output: Value,
-        #[serde(default)]
-        is_error: bool,
-    },
-    Custom {
-        value: Value,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LlmMessageRole {
-    User,
-    Assistant,
-    Developer,
-    Tool,
-    Diagnostic,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
-pub enum LlmContentPart {
-    Text { text: String },
-    Reasoning { text: String },
-    Json { value: Value },
-    ImageRef { uri: String },
-    FileRef { uri: String },
-    Diagnostic { message: String },
-    Custom { value: Value },
 }

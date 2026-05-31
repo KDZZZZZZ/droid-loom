@@ -147,7 +147,7 @@ mod tests {
         fn new(name: &str, visibility: ToolVisibility) -> Self {
             Self {
                 metadata: ToolMetadata::new(
-                    ToolSchema::empty_object(name, format!("{} tool", name)).unwrap(),
+                    ToolSchema::empty_object(name, format!("{name} tool")).unwrap(),
                     visibility,
                 ),
             }

@@ -2,8 +2,9 @@ use crate::app_map_memory::{
     sample_cross_app_map, AppMapMemory, CandidateAction, CandidateActionKind, LocalMapView,
 };
 use agent_core::agent_definition::AgentDefinition;
+use agent_core::content_block::ContentBlock;
+use agent_core::run_message::RunMessage;
 use agent_core::tool_executor::{ToolCall, ToolExecutor};
-use agent_core::tool_result::ToolResultStatus;
 use agent_core::{AgentCoreError, AgentCoreResult};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -378,8 +379,8 @@ fn execute_tool_step(
     let view: LocalMapView = map.local_view(Some(page), 1, None);
     let local_tokens = AppMapMemory::estimate_context_tokens(&view);
     let full_tokens = map.estimate_full_map_tokens();
-    let result = executor.execute_one(definition, call.clone())?;
-    if result.status != ToolResultStatus::Success {
+    let tool_message = executor.execute_one_message(definition, call.clone())?;
+    if tool_message_is_error(&tool_message) {
         return Err(AgentCoreError::Recoverable(format!(
             "tool `{}` failed in long task",
             call.tool_name
@@ -406,6 +407,13 @@ fn execute_tool_step(
         full_map_tokens: full_tokens,
     });
     Ok(())
+}
+
+fn tool_message_is_error(message: &RunMessage) -> bool {
+    message
+        .content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolResult { is_error: true, .. }))
 }
 
 fn count_app_switch(

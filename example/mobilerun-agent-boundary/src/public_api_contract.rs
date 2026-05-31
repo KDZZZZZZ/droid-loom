@@ -129,7 +129,6 @@ fn probability_graph_task_context_and_key_routing_public_api_contract() -> Agent
     let executor = ToolExecutor::new(Arc::new(registry.clone()));
     let outcome =
         TrajectoryProbabilityGraph::execute_preexecution_plan(&executor, &definition, plan)?;
-    assert_eq!(outcome.results.len(), 1);
     assert_eq!(outcome.messages.len(), 1);
 
     let layers = probability_graph.plan_tool_layers(&default_tool_visibility(), 0.8);

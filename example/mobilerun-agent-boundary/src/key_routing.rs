@@ -123,9 +123,10 @@ impl KeyRoutePlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_core::content_block::ContentBlock;
     use agent_core::llm_deepseek_chat::DeepSeekChatProvider;
     use agent_core::llm_provider::LlmProvider;
-    use agent_core::llm_request::{LlmContentPart, LlmInputItem, LlmMessageRole};
+    use agent_core::run_message::RunMessage;
 
     #[test]
     fn stable_and_general_prefixes_route_to_different_key_slots() {
@@ -224,13 +225,9 @@ mod tests {
     fn chat_request() -> LlmRequest {
         let mut request = LlmRequest::new("mimo-v2.5-pro");
         request.instructions = Some("stable Android agent prefix".to_string());
-        request.input.push(LlmInputItem::Message {
-            role: LlmMessageRole::User,
-            content: vec![LlmContentPart::Text {
-                text: "observe current app state".to_string(),
-            }],
-            metadata: BTreeMap::new(),
-        });
+        request.push_message(
+            RunMessage::user(vec![ContentBlock::text("observe current app state")]).unwrap(),
+        );
         request
     }
 }

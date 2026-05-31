@@ -78,13 +78,13 @@ parallel tool calls、context window、成本和 compatibility flags。
 
 ### `src/llm/request.rs`
 
-定义 provider request snapshot。包含 model、instructions、input items、tool schemas、reasoning、
+定义 provider request snapshot。包含 model、instructions、`RunMessage` messages、tool schemas、reasoning、
 include fields、store/previous response/conversation 策略、metadata、headers、api key。
 
 ### `src/llm/context.rs`
 
 把 session replay snapshot、本轮 user message、graph run messages、`AgentDefinition` 的 system prompt
-和 visible tool schemas 转成 provider request snapshot。
+和 visible tool schemas 转成 message-first provider request snapshot。
 
 它不读原始用户输入，不写 session tree，不执行 tool。system prompt 只在这里转换成 provider
 instructions；factory 不转换 prompt，也不拼 provider context。
@@ -95,7 +95,7 @@ instructions；factory 不转换 prompt，也不拼 provider context。
 
 ### `src/llm/openai_responses.rs`
 
-OpenAI Responses adapter。负责 instructions、input items、function tools、function call、
+OpenAI Responses adapter。负责把 `RunMessage`/`ContentBlock` 转成 Responses input、function tools、function call、
 `function_call_output`、response id、usage、reasoning metadata 和 stream event 映射。
 
 ### `src/llm/deepseek_chat.rs`

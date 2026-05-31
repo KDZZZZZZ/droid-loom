@@ -359,7 +359,7 @@ impl AgentCore {
         include_tools: bool,
     ) -> Result<PreparedLlmRequest, AgentError> {
         let mut input = ContextBuildInput::new(self.model.clone());
-        input.run_messages = history.to_vec();
+        input.messages = history.to_vec();
         input
             .metadata
             .insert("deepseek.stream".to_string(), json!(false));
@@ -497,7 +497,7 @@ fn assistant_turn_from_events(events: Vec<LlmStreamEvent>) -> Result<AssistantTu
     }
 
     let mut message = builder.finish().map_err(map_core_error)?;
-    if let Some(usage) = usage.clone() {
+    if let Some(usage) = usage {
         message = message.with_usage(usage);
     }
     Ok(AssistantTurn {

@@ -105,8 +105,8 @@ registry 只解析可见性和加载策略，不做权限判断。
 通过 `tool_execution` wrapper handler 执行 tool、触发 `tool_result` hook、交给 `src/tool/result.rs` 生成 tool message、
 触发 `tool_execution_end`。
 
-`ToolExecutor::execute_batch_parallel()` 是并行 batch 扩展点。它并行执行多个独立 tool call，并按输入顺序返回结果，
-因此调用方可以安全地把结果转换为 message 后继续交给 provider。并行只改变调度，不改变 schema、visibility、
+`ToolExecutor::execute_batch_parallel_messages()` 是并行 batch 的 message 主路径。它并行执行多个独立 tool call，并按输入顺序返回 tool result messages，
+因此调用方可以直接把这些 messages 继续交给 provider。并行只改变调度，不改变 schema、visibility、
 permission 或 result mapping 规则。
 
 ### `src/tool/result.rs`

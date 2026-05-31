@@ -202,7 +202,7 @@ mod tests {
                     Cardinality::Latest,
                 ),
             ))
-            .edge("input_to_final", ("input", "messages"), ("final", "input"))
+            .edge("input_to_final", "input", ("final", "input"))
             .finish_at("final")
             .build()
             .unwrap();

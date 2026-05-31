@@ -5,11 +5,9 @@ param(
     [string]$ApiBase = $env:MIMO_API_BASE,
     [string]$Model = $env:MIMO_MODEL,
     [string]$Proxy = $env:MIMO_PROXY,
-    [int]$TargetToolCalls = 100,
-    [int]$MinimumRequiredToolCalls = 95,
-    [int]$ReactSelfCheckInterval = 10,
-    [int]$MaxToolRounds = 128,
-    [int]$WaitSeconds = 900,
+    [string]$Task = "check emulator Settings and Wi-Fi readiness, write a handoff note, then return to Agent Smoke",
+    [int]$MaxToolRounds = 48,
+    [int]$WaitSeconds = 600,
     [string]$ReportPath = "android-shell\app-map-autonomous-report.json"
 )
 
@@ -50,7 +48,20 @@ function Invoke-Adb {
     param([string[]]$Arguments)
     & $AdbPath @Arguments
     if ($LASTEXITCODE -ne 0) {
-        throw "adb failed with exit code ${LASTEXITCODE}: $($Arguments -join ' ')"
+        $safeArguments = @()
+        $redactNext = $false
+        foreach ($argument in $Arguments) {
+            if ($redactNext) {
+                $safeArguments += "<redacted>"
+                $redactNext = $false
+                continue
+            }
+            $safeArguments += $argument
+            if ($argument -eq "mimo_api_key") {
+                $redactNext = $true
+            }
+        }
+        throw "adb failed with exit code ${LASTEXITCODE}: $($safeArguments -join ' ')"
     }
 }
 
@@ -106,14 +117,13 @@ Invoke-Adb @("devices") | Out-Null
 Invoke-Adb @("install", "-r", $ApkPath) | Out-Null
 Invoke-Adb @("shell", "pm", "grant", "com.example.agentsmoke", "android.permission.POST_NOTIFICATIONS") 2>$null
 Invoke-Adb @("shell", "appops", "set", "com.example.agentsmoke", "SYSTEM_ALERT_WINDOW", "allow")
-Invoke-Adb @("shell", "settings", "put", "secure", "enabled_accessibility_services", "com.example.agentsmoke/com.example.agentsmoke.AgentAccessibilityService")
-Invoke-Adb @("shell", "settings", "put", "secure", "accessibility_enabled", "1")
+Invoke-Adb @("shell", "appops", "set", "com.example.agentsmoke", "ACCESS_RESTRICTED_SETTINGS", "allow")
+Invoke-Adb @("shell", "settings", "--user", "0", "put", "secure", "enabled_accessibility_services", "com.example.agentsmoke/com.example.agentsmoke.AgentAccessibilityService")
+Invoke-Adb @("shell", "settings", "--user", "0", "put", "secure", "accessibility_enabled", "1")
 Invoke-Adb @("logcat", "-c")
 
 $debugInput = @{
-    target_tool_calls = $TargetToolCalls
-    minimum_required_tool_calls = $MinimumRequiredToolCalls
-    react_self_check_interval = $ReactSelfCheckInterval
+    task = $Task
     max_tool_rounds = $MaxToolRounds
 } | ConvertTo-Json -Compress
 $debugInputBase64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($debugInput))
@@ -147,44 +157,43 @@ try {
     }
 }
 
+$requiredEvidence = @(
+    "provider_returned_answer",
+    "primitive_tool_used",
+    "macro_tools_absent",
+    "device_state_checked",
+    "settings_ui_observed",
+    "wifi_ui_observed",
+    "app_map_memory_used",
+    "home_navigation_used",
+    "returned_to_agent_app",
+    "clipboard_handoff_written",
+    "visible_status_shown"
+)
+$evidence = if ($parsed -and $parsed.required_evidence -ne $null) { $parsed.required_evidence } else { $null }
+$missingEvidence = @()
+foreach ($name in $requiredEvidence) {
+    if ($null -eq $evidence -or -not [bool]$evidence.$name) {
+        $missingEvidence += $name
+    }
+}
+
 $validation = [ordered]@{
-    target_tool_calls = $TargetToolCalls
-    minimum_required_tool_calls = $MinimumRequiredToolCalls
+    task = $Task
     actual_tool_calls = if ($parsed -and $parsed.actual_tool_calls -ne $null) { [int]$parsed.actual_tool_calls } else { 0 }
     provider_tool_traces = if ($parsed -and $parsed.provider_tool_traces -ne $null) { [int]$parsed.provider_tool_traces } else { 0 }
     macro_tool_traces = if ($parsed -and $parsed.macro_tool_traces -ne $null) { [int]$parsed.macro_tool_traces } else { -1 }
     meaningful_phone_task = if ($parsed -and $parsed.meaningful_phone_task -ne $null) { [bool]$parsed.meaningful_phone_task } else { $false }
-    navigation_tool_calls = if ($parsed -and $parsed.navigation_tool_calls -ne $null) { [int]$parsed.navigation_tool_calls } else { 0 }
-    observation_tool_calls = if ($parsed -and $parsed.observation_tool_calls -ne $null) { [int]$parsed.observation_tool_calls } else { 0 }
-    artifact_tool_calls = if ($parsed -and $parsed.artifact_tool_calls -ne $null) { [int]$parsed.artifact_tool_calls } else { 0 }
-    device_read_tool_calls = if ($parsed -and $parsed.device_read_tool_calls -ne $null) { [int]$parsed.device_read_tool_calls } else { 0 }
-    successful_navigation_tool_calls = if ($parsed -and $parsed.successful_navigation_tool_calls -ne $null) { [int]$parsed.successful_navigation_tool_calls } else { 0 }
-    successful_observation_tool_calls = if ($parsed -and $parsed.successful_observation_tool_calls -ne $null) { [int]$parsed.successful_observation_tool_calls } else { 0 }
-    successful_artifact_tool_calls = if ($parsed -and $parsed.successful_artifact_tool_calls -ne $null) { [int]$parsed.successful_artifact_tool_calls } else { 0 }
-    successful_device_read_tool_calls = if ($parsed -and $parsed.successful_device_read_tool_calls -ne $null) { [int]$parsed.successful_device_read_tool_calls } else { 0 }
-    unique_tool_count = if ($parsed -and $parsed.unique_tool_count -ne $null) { [int]$parsed.unique_tool_count } else { 0 }
-    argument_signature_count = if ($parsed -and $parsed.argument_signature_count -ne $null) { [int]$parsed.argument_signature_count } else { 0 }
-    task_subgoal_coverage_count = if ($parsed -and $parsed.task_subgoal_coverage_count -ne $null) { [int]$parsed.task_subgoal_coverage_count } else { 0 }
     repeated_fixed_action_loop = if ($parsed -and $parsed.repeated_fixed_action_loop -ne $null) { [bool]$parsed.repeated_fixed_action_loop } else { $true }
+    required_evidence = $evidence
+    missing_evidence = $missingEvidence
 }
 $validation["ok"] = [bool](
     $parsed.ok `
-    -and $validation.actual_tool_calls -ge $MinimumRequiredToolCalls `
-    -and $validation.provider_tool_traces -ge $MinimumRequiredToolCalls `
-    -and $validation.macro_tool_traces -eq 0 `
     -and $validation.meaningful_phone_task `
-    -and $validation.navigation_tool_calls -ge 10 `
-    -and $validation.observation_tool_calls -ge 30 `
-    -and $validation.artifact_tool_calls -ge 6 `
-    -and $validation.device_read_tool_calls -ge 4 `
-    -and $validation.successful_navigation_tool_calls -ge 10 `
-    -and $validation.successful_observation_tool_calls -ge 20 `
-    -and $validation.successful_artifact_tool_calls -ge 6 `
-    -and $validation.successful_device_read_tool_calls -ge 4 `
-    -and $validation.unique_tool_count -ge 10 `
-    -and $validation.argument_signature_count -ge 30 `
-    -and $validation.task_subgoal_coverage_count -ge 8 `
-    -and -not $validation.repeated_fixed_action_loop
+    -and $validation.macro_tool_traces -eq 0 `
+    -and -not $validation.repeated_fixed_action_loop `
+    -and $missingEvidence.Count -eq 0
 )
 
 $report = [ordered]@{
@@ -192,9 +201,7 @@ $report = [ordered]@{
     key_env = $key.Name
     api_base = $ApiBase
     model = $Model
-    target_tool_calls = $TargetToolCalls
-    minimum_required_tool_calls = $MinimumRequiredToolCalls
-    react_self_check_interval = $ReactSelfCheckInterval
+    task = $Task
     max_tool_rounds = $MaxToolRounds
     generated_at = (Get-Date).ToString("o")
     validation = $validation

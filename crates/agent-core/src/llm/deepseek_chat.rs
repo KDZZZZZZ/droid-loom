@@ -1,8 +1,10 @@
+use crate::content_block::ContentBlock;
 use crate::error::{AgentCoreError, AgentCoreResult};
 use crate::llm_model::{LlmApi, LlmModel};
 use crate::llm_provider::{LlmProvider, PreparedLlmRequest};
-use crate::llm_request::{LlmContentPart, LlmInputItem, LlmMessageRole, LlmRequest};
+use crate::llm_request::LlmRequest;
 use crate::llm_stream::{LlmStreamEvent, LlmUsage};
+use crate::run_message::{MessageRole, RunMessage};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -288,138 +290,113 @@ fn map_messages(request: &LlmRequest) -> AgentCoreResult<Vec<Value>> {
         }
     }
 
-    for item in &request.input {
-        match item {
-            LlmInputItem::Message {
-                role,
-                content,
-                metadata: _,
-            } => messages.push(map_message(*role, content)?),
-            LlmInputItem::FunctionCall {
-                call_id,
-                name,
-                arguments,
-            } => attach_or_push_tool_call(&mut messages, call_id, name, arguments)?,
-            LlmInputItem::FunctionCallOutput {
-                call_id,
-                output,
-                is_error,
-            } => {
-                let mut message = json!({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": output_to_string(output)?,
-                });
-                if *is_error {
-                    message["content"] = Value::String(format!(
-                        "tool returned error: {}",
-                        output_to_string(output)?
-                    ));
-                }
-                messages.push(message);
-            }
-            LlmInputItem::Custom { value } => messages.push(value.clone()),
-        }
+    for message in &request.messages {
+        messages.extend(map_run_message(message)?);
     }
 
     Ok(messages)
 }
 
-fn map_message(role: LlmMessageRole, content: &[LlmContentPart]) -> AgentCoreResult<Value> {
+fn map_run_message(message: &RunMessage) -> AgentCoreResult<Vec<Value>> {
+    let mut messages = Vec::new();
     let mut content_fragments = Vec::new();
     let mut reasoning_fragments = Vec::new();
+    let mut tool_calls = Vec::new();
 
-    for part in content {
-        match part {
-            LlmContentPart::Text { text } => content_fragments.push(text.clone()),
-            LlmContentPart::Reasoning { text } => {
-                if role == LlmMessageRole::Assistant {
+    for block in &message.content {
+        match block {
+            ContentBlock::Text { text } => content_fragments.push(text.clone()),
+            ContentBlock::Reasoning { text } => {
+                if message.role == MessageRole::Assistant {
                     reasoning_fragments.push(text.clone());
                 } else {
                     content_fragments.push(text.clone());
                 }
             }
-            LlmContentPart::Json { value } | LlmContentPart::Custom { value } => {
-                content_fragments.push(value.to_string());
-            }
-            LlmContentPart::ImageRef { uri } => {
+            ContentBlock::ImageReference { uri, .. } => {
                 content_fragments.push(format!("[image: {uri}]"));
             }
-            LlmContentPart::FileRef { uri } => {
+            ContentBlock::FileReference { uri, .. } => {
                 content_fragments.push(format!("[file: {uri}]"));
             }
-            LlmContentPart::Diagnostic { message } => content_fragments.push(message.clone()),
+            ContentBlock::AudioReference { uri, .. } => {
+                content_fragments.push(format!("[audio: {uri}]"));
+            }
+            ContentBlock::Diagnostic { message, .. } => content_fragments.push(message.clone()),
+            ContentBlock::Custom { value } => content_fragments.push(value.to_string()),
+            ContentBlock::ToolCall {
+                call_id,
+                tool_name,
+                arguments,
+            } => tool_calls.push(json!({
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": arguments_to_string(arguments)?,
+                }
+            })),
+            ContentBlock::ToolResult {
+                call_id,
+                output,
+                is_error,
+                ..
+            } => {
+                let mut tool_message = json!({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": output_to_string(output)?,
+                });
+                if *is_error {
+                    tool_message["content"] = Value::String(format!(
+                        "tool returned error: {}",
+                        output_to_string(output)?
+                    ));
+                }
+                messages.push(tool_message);
+            }
         }
     }
 
-    let mut message = Map::new();
-    message.insert(
-        "role".to_string(),
-        Value::String(map_role(role).to_string()),
-    );
-    message.insert(
-        "content".to_string(),
-        Value::String(content_fragments.join("\n")),
-    );
-
-    if role == LlmMessageRole::Assistant && !reasoning_fragments.is_empty() {
-        message.insert(
-            "reasoning_content".to_string(),
-            Value::String(reasoning_fragments.join("\n")),
+    if !content_fragments.is_empty() || !reasoning_fragments.is_empty() || !tool_calls.is_empty() {
+        let mut mapped = Map::new();
+        mapped.insert(
+            "role".to_string(),
+            Value::String(map_role(message.role).to_string()),
         );
+        mapped.insert(
+            "content".to_string(),
+            if content_fragments.is_empty() && !tool_calls.is_empty() {
+                Value::Null
+            } else {
+                Value::String(content_fragments.join("\n"))
+            },
+        );
+
+        if message.role == MessageRole::Assistant && !reasoning_fragments.is_empty() {
+            mapped.insert(
+                "reasoning_content".to_string(),
+                Value::String(reasoning_fragments.join("\n")),
+            );
+        }
+
+        if !tool_calls.is_empty() {
+            mapped.insert("tool_calls".to_string(), Value::Array(tool_calls));
+        }
+
+        messages.insert(0, Value::Object(mapped));
     }
 
-    Ok(Value::Object(message))
+    Ok(messages)
 }
 
-fn map_role(role: LlmMessageRole) -> &'static str {
+fn map_role(role: MessageRole) -> &'static str {
     match role {
-        LlmMessageRole::User => "user",
-        LlmMessageRole::Assistant => "assistant",
-        LlmMessageRole::Developer | LlmMessageRole::Diagnostic => "system",
-        LlmMessageRole::Tool => "tool",
+        MessageRole::User => "user",
+        MessageRole::Assistant => "assistant",
+        MessageRole::Tool => "tool",
+        MessageRole::Diagnostic => "system",
     }
-}
-
-fn attach_or_push_tool_call(
-    messages: &mut Vec<Value>,
-    call_id: &str,
-    name: &str,
-    arguments: &Value,
-) -> AgentCoreResult<()> {
-    let tool_call = json!({
-        "id": call_id,
-        "type": "function",
-        "function": {
-            "name": name,
-            "arguments": arguments_to_string(arguments)?,
-        }
-    });
-
-    if let Some(last) = messages.last_mut() {
-        if last.get("role").and_then(Value::as_str) == Some("assistant") {
-            if last.get("content").is_none() {
-                last["content"] = Value::Null;
-            }
-            let tool_calls = last
-                .as_object_mut()
-                .expect("message json object")
-                .entry("tool_calls")
-                .or_insert_with(|| Value::Array(Vec::new()));
-            if let Some(tool_calls) = tool_calls.as_array_mut() {
-                tool_calls.push(tool_call);
-                return Ok(());
-            }
-        }
-    }
-
-    messages.push(json!({
-        "role": "assistant",
-        "content": null,
-        "tool_calls": [tool_call],
-    }));
-
-    Ok(())
 }
 
 fn map_tool_schema(schema: &crate::tool_schema::ToolSchema) -> Value {
@@ -517,7 +494,9 @@ fn map_completed_tool_call(tool_call: &Value) -> AgentCoreResult<LlmStreamEvent>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm_request::{LlmContentPart, LlmInputItem, LlmMessageRole, LlmRequest};
+    use crate::content_block::ContentBlock;
+    use crate::llm_request::LlmRequest;
+    use crate::run_message::RunMessage;
     use crate::tool_schema::ToolSchema;
     use serde_json::json;
 
@@ -525,13 +504,7 @@ mod tests {
     fn maps_request_to_deepseek_chat_body() {
         let mut request = LlmRequest::new("deepseek-v4-flash");
         request.instructions = Some("system prompt".to_string());
-        request.input.push(LlmInputItem::Message {
-            role: LlmMessageRole::User,
-            content: vec![LlmContentPart::Text {
-                text: "hello".to_string(),
-            }],
-            metadata: BTreeMap::new(),
-        });
+        request.push_message(RunMessage::user(vec![ContentBlock::text("hello")]).unwrap());
         request.tools.push(
             ToolSchema::new(
                 "search",
@@ -556,23 +529,22 @@ mod tests {
     #[test]
     fn maps_tool_call_and_tool_result_messages() {
         let mut request = LlmRequest::new("deepseek-v4-flash");
-        request.input.push(LlmInputItem::Message {
-            role: LlmMessageRole::Assistant,
-            content: vec![LlmContentPart::Reasoning {
-                text: "need a tool".to_string(),
-            }],
-            metadata: BTreeMap::new(),
-        });
-        request.input.push(LlmInputItem::FunctionCall {
-            call_id: "call-1".to_string(),
-            name: "search".to_string(),
-            arguments: json!({"query": "rust"}),
-        });
-        request.input.push(LlmInputItem::FunctionCallOutput {
-            call_id: "call-1".to_string(),
-            output: json!({"answer": 42}),
-            is_error: false,
-        });
+        request.push_message(
+            RunMessage::assistant(vec![
+                ContentBlock::reasoning("need a tool"),
+                ContentBlock::tool_call("call-1", "search", json!({"query": "rust"})),
+            ])
+            .unwrap(),
+        );
+        request.push_message(
+            RunMessage::tool(vec![ContentBlock::tool_result(
+                "call-1",
+                Some("search".to_string()),
+                json!({"answer": 42}),
+                false,
+            )])
+            .unwrap(),
+        );
 
         let body = DeepSeekChatProvider::request_body(&request).unwrap();
 
@@ -625,13 +597,7 @@ mod tests {
         assert!(!format!("{provider:?}").contains("secret"));
 
         let mut request = LlmRequest::new("deepseek-v4-flash");
-        request.input.push(LlmInputItem::Message {
-            role: LlmMessageRole::User,
-            content: vec![LlmContentPart::Text {
-                text: "hello".to_string(),
-            }],
-            metadata: BTreeMap::new(),
-        });
+        request.push_message(RunMessage::user(vec![ContentBlock::text("hello")]).unwrap());
 
         let prepared = provider.prepare_request(&request).unwrap();
         assert_eq!(prepared.endpoint, DEEPSEEK_DEFAULT_ENDPOINT);

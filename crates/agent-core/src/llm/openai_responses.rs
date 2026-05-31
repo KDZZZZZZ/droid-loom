@@ -1,8 +1,10 @@
+use crate::content_block::ContentBlock;
 use crate::error::{AgentCoreError, AgentCoreResult};
 use crate::llm_model::{LlmApi, LlmModel};
 use crate::llm_provider::{LlmProvider, PreparedLlmRequest};
-use crate::llm_request::{LlmContentPart, LlmInputItem, LlmMessageRole, LlmRequest};
+use crate::llm_request::LlmRequest;
 use crate::llm_stream::{LlmStreamEvent, LlmUsage};
+use crate::run_message::{MessageRole, RunMessage};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
@@ -50,10 +52,13 @@ impl OpenAiResponsesProvider {
             "input".to_string(),
             Value::Array(
                 request
-                    .input
+                    .messages
                     .iter()
-                    .map(map_input_item)
-                    .collect::<AgentCoreResult<Vec<_>>>()?,
+                    .map(map_message_items)
+                    .collect::<AgentCoreResult<Vec<_>>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>(),
             ),
         );
 
@@ -216,82 +221,101 @@ impl LlmProvider for OpenAiResponsesProvider {
     }
 }
 
-fn map_input_item(item: &LlmInputItem) -> AgentCoreResult<Value> {
-    match item {
-        LlmInputItem::Message {
-            role,
-            content,
-            metadata: _,
-        } => Ok(json!({
-            "role": map_role(*role),
-            "content": content.iter().map(map_content_part).collect::<Vec<_>>(),
-        })),
-        LlmInputItem::FunctionCall {
-            call_id,
-            name,
-            arguments,
-        } => Ok(json!({
-            "type": "function_call",
-            "call_id": call_id,
-            "name": name,
-            "arguments": arguments_to_string(arguments)?,
-        })),
-        LlmInputItem::FunctionCallOutput {
-            call_id,
-            output,
-            is_error,
-        } => {
-            let mut item = json!({
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": output_to_string(output)?,
-            });
-            if *is_error {
-                item["is_error"] = Value::Bool(true);
-            }
-            Ok(item)
+fn map_message_items(message: &RunMessage) -> AgentCoreResult<Vec<Value>> {
+    let mut items = Vec::new();
+    let mut content = Vec::new();
+
+    for block in &message.content {
+        match block {
+            ContentBlock::ToolCall {
+                call_id,
+                tool_name,
+                arguments,
+            } => items.push(map_tool_call(call_id, tool_name, arguments)?),
+            ContentBlock::ToolResult {
+                call_id,
+                output,
+                is_error,
+                ..
+            } => items.push(map_tool_result(call_id, output, *is_error)?),
+            _ => content.push(map_content_block(block)),
         }
-        LlmInputItem::Custom { value } => Ok(value.clone()),
     }
+
+    if !content.is_empty() {
+        items.insert(
+            0,
+            json!({
+                "role": map_role(message.role),
+                "content": content,
+            }),
+        );
+    }
+
+    Ok(items)
 }
 
-fn map_role(role: LlmMessageRole) -> &'static str {
+fn map_tool_call(call_id: &str, name: &str, arguments: &Value) -> AgentCoreResult<Value> {
+    Ok(json!({
+        "type": "function_call",
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments_to_string(arguments)?,
+    }))
+}
+
+fn map_tool_result(call_id: &str, output: &Value, is_error: bool) -> AgentCoreResult<Value> {
+    let mut item = json!({
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": output_to_string(output)?,
+    });
+    if is_error {
+        item["is_error"] = Value::Bool(true);
+    }
+    Ok(item)
+}
+
+fn map_role(role: MessageRole) -> &'static str {
     match role {
-        LlmMessageRole::User => "user",
-        LlmMessageRole::Assistant => "assistant",
-        LlmMessageRole::Developer => "developer",
-        LlmMessageRole::Tool => "user",
-        LlmMessageRole::Diagnostic => "developer",
+        MessageRole::User => "user",
+        MessageRole::Assistant => "assistant",
+        MessageRole::Tool => "user",
+        MessageRole::Diagnostic => "developer",
     }
 }
 
-fn map_content_part(part: &LlmContentPart) -> Value {
-    match part {
-        LlmContentPart::Text { text } => json!({
+fn map_content_block(block: &ContentBlock) -> Value {
+    match block {
+        ContentBlock::Text { text } => json!({
             "type": "input_text",
             "text": text,
         }),
-        LlmContentPart::Reasoning { text } => json!({
+        ContentBlock::Reasoning { text } => json!({
             "type": "input_text",
             "text": text,
         }),
-        LlmContentPart::Json { value } => json!({
-            "type": "input_text",
-            "text": value.to_string(),
-        }),
-        LlmContentPart::ImageRef { uri } => json!({
-            "type": "input_image",
-            "image_url": uri,
-        }),
-        LlmContentPart::FileRef { uri } => json!({
+        ContentBlock::FileReference { uri, .. } => json!({
             "type": "input_file",
             "file_url": uri,
         }),
-        LlmContentPart::Diagnostic { message } => json!({
+        ContentBlock::ImageReference { uri, .. } => json!({
+            "type": "input_image",
+            "image_url": uri,
+        }),
+        ContentBlock::AudioReference { uri, mime_type } => json!({
+            "type": "audio_reference",
+            "uri": uri,
+            "mime_type": mime_type,
+        }),
+        ContentBlock::Diagnostic { message, .. } => json!({
             "type": "input_text",
             "text": message,
         }),
-        LlmContentPart::Custom { value } => value.clone(),
+        ContentBlock::Custom { value } => value.clone(),
+        ContentBlock::ToolCall { .. } | ContentBlock::ToolResult { .. } => {
+            json!({"type": "input_text", "text": ""})
+        }
     }
 }
 
@@ -341,17 +365,23 @@ fn map_output_item_done(value: &Value) -> AgentCoreResult<Option<LlmStreamEvent>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm_request::{LlmInputItem, LlmRequest};
+    use crate::content_block::ContentBlock;
+    use crate::llm_request::LlmRequest;
+    use crate::run_message::RunMessage;
     use serde_json::json;
 
     #[test]
     fn maps_tool_result_to_function_call_output() {
         let mut request = LlmRequest::new("gpt-test");
-        request.input.push(LlmInputItem::FunctionCallOutput {
-            call_id: "call-1".to_string(),
-            output: json!({"answer": 42}),
-            is_error: false,
-        });
+        request.push_message(
+            RunMessage::tool(vec![ContentBlock::tool_result(
+                "call-1",
+                Some("search".to_string()),
+                json!({"answer": 42}),
+                false,
+            )])
+            .unwrap(),
+        );
 
         let body = OpenAiResponsesProvider::request_body(&request).unwrap();
         assert_eq!(body["input"][0]["type"], "function_call_output");

@@ -131,7 +131,7 @@ fn main() -> AgentCoreResult<()> {
                 Cardinality::Latest,
             ),
         ))
-        .edge("input_to_done", ("input", "messages"), ("done", "input"))
+        .edge("input_to_done", "input", ("done", "input"))
         .finish_at("done")
         .build()?;
 
@@ -148,7 +148,7 @@ fn main() -> AgentCoreResult<()> {
                 Cardinality::Latest,
             ),
         ))
-        .edge("input_to_start", ("input", "messages"), ("start", "input"))
+        .edge("input_to_start", "input", ("start", "input"))
         .finish_at("start")
         .build()?;
     let cancelled = cancel_agent.run(AgentRunInput::new(cancel_graph).with_stop_requested(true))?;

@@ -41,8 +41,9 @@ function ConvertTo-Base64Json {
 
 function Enable-AgentPermissions {
     Invoke-Adb @("shell", "appops", "set", "com.example.agentsmoke", "SYSTEM_ALERT_WINDOW", "allow") | Out-Null
-    Invoke-Adb @("shell", "settings", "put", "secure", "enabled_accessibility_services", "com.example.agentsmoke/com.example.agentsmoke.AgentAccessibilityService") | Out-Null
-    Invoke-Adb @("shell", "settings", "put", "secure", "accessibility_enabled", "1") | Out-Null
+    Invoke-Adb @("shell", "appops", "set", "com.example.agentsmoke", "ACCESS_RESTRICTED_SETTINGS", "allow") | Out-Null
+    Invoke-Adb @("shell", "settings", "--user", "0", "put", "secure", "enabled_accessibility_services", "com.example.agentsmoke/com.example.agentsmoke.AgentAccessibilityService") | Out-Null
+    Invoke-Adb @("shell", "settings", "--user", "0", "put", "secure", "accessibility_enabled", "1") | Out-Null
 }
 
 function Read-DebugToolOutput {

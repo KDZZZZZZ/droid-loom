@@ -1,4 +1,4 @@
-# 源码文件职责地图
+﻿# 源码文件职责地图
 
 日期：2026-05-30
 
@@ -117,7 +117,7 @@
 
 内部逻辑：把 FastAgent 动作 `click`、`click_at`、`click_area`、`long_press`、`long_press_at`、`type`、`type_secret`、`swipe`、`system_button`、`wait`、`open_app`、`remember`、`complete` 映射成 `ToolSchema`；补充 `screenshot`、`ui_state`、`search_database` 和 hidden `raw_adb_shell`；tool invoke 只返回 mock observation。
 
-交互：通过 `ToolRegistry` 注册，通过 `ToolExecutor` 执行，通过 `ToolResult::into_run_message()` 回到 message 层。
+交互：通过 `ToolRegistry` 注册，通过 `ToolExecutor` 执行；主路径使用 `execute_*_message(s)` 直接回到 message 层，`ToolResult` 只保留给审计和底层测试。
 
 使用者：tool pack 作者、平台 adapter 作者、core tool API 回归测试。
 
@@ -157,7 +157,7 @@
 
 内部逻辑：读取 `ReplaySnapshot.messages` 或 finalized `Vec<RunMessage>`，抽取 `message:*`、`tool_call:*`、`tool_result:*:{ok|error}` 事件，统计 transition count、tool session probability 和 likely-next prediction；根据概率和 `ToolMetadata::can_preexecute()` 生成只读幂等工具预执行计划；根据工具使用概率生成 hot direct tools、cold searchable tools 和 hidden tools 分层。
 
-交互：读取 message/session replay、查询 `ToolRegistry`、调用 `ToolExecutor::execute_batch_parallel()`，并用 `ToolResult::into_run_message()` 把预执行结果重新交回 message 层；不直接调用 provider，不持久化 session，不实现具体工具。
+交互：读取 message/session replay、查询 `ToolRegistry`、调用 `ToolExecutor::execute_batch_parallel_messages()`，把预执行结果直接交回 message 层；不直接调用 provider，不持久化 session，不实现具体工具。
 
 使用者：runtime optimizer、移动端 agent shell、回归测试。
 
@@ -207,7 +207,7 @@
 
 内部逻辑：`CoreEvent` 表达 agent、graph、node、message、hook、error 等运行事件；`EventLog` 是轻量 Vec 包装。
 
-交互：`Agent::run` 和 `GraphRunner` 产出事件；UI/trace/test 读取事件但不改变行为。
+交互：常规路径由 `TurnLoop` 运行 graph 并产出事件；低层 `Agent::run` 和 `GraphRunner` 仍可在高级适配器/测试中产出事件。UI/trace/test 读取事件但不改变行为。
 
 使用者：CLI renderer、TUI/HTTP streaming、trace recorder、测试断言。
 
@@ -229,7 +229,7 @@
 
 内部逻辑：校验 definition，并把 `AgentServices` 注入 `Agent`；不解析 tool，不构造 context，不写 session。
 
-交互：向 `src/agent/agent.rs` 传入 `GraphRunner` 等服务依赖。
+交互：向 `src/agent/agent.rs` 传入 runner 等高级服务依赖；常规外部执行由 `TurnLoop` 持有 runner 能力。
 
 使用者：应用启动层、测试 harness、未来 runtime facade。
 
@@ -237,9 +237,9 @@
 
 职责：单个 agent 生命周期的 public facade。
 
-内部逻辑：持有 agent id、definition、services、cancellation token；`run()` 接收 graph 和初始消息，调用 `GraphRunner`，返回 result/events。
+内部逻辑：持有 agent id、definition、services、cancellation token；`run()` 仍是高级/兼容路径，接收 graph 和初始消息，调用 runner，返回 result/events。
 
-交互：不管理 TurnLoop、session tree、message loading；graph 通过 `Agent` 调用一个已定义 agent。
+交互：不管理 TurnLoop、session tree、message loading；child-agent executor 可以通过 `Agent` 调用一个已定义 agent。
 
 使用者：CLI/TUI/HTTP run endpoint、graph child-agent executor、测试。
 
@@ -293,7 +293,7 @@
 
 内部逻辑：保存 nodes、edges、start/end nodes、budget；build 时校验 graph name、start/end、edge source/target。
 
-交互：`Agent::run` 接收 `Graph`；`GraphRunner` 读取 graph 推进单次 run。
+交互：`TurnLoop::run_message` 接收 `Graph` 并推进一轮 turn；低层 runner 读取 graph 推进单次 run。
 
 使用者：默认 graph template、多 agent 编排器、测试。
 
@@ -301,9 +301,9 @@
 
 职责：定义 node 契约和 runtime node spec。
 
-内部逻辑：node kind 包括 transform、tool、agent、graph 和 final；node 执行由 `NodeExecutor` 完成，输出写入明确 output port。
+内部逻辑：node kind 包括 transform、tool、agent、graph 和 final；node 执行由 `NodeExecutor` 完成，返回 `NodeResult` messages。
 
-交互：`GraphRunner` 调用 async runtime，runtime 通过 `NodeExecutor` 执行 node 并消费 `NodeOutput`；`NodeKind::Agent` 是 child agent executor 的声明，不由 edge 执行。
+交互：`TurnLoop` 经由内部 runner 调用 async runtime；runtime 通过 `NodeExecutor` 执行 node 并消费 `NodeResult`。`NodeKind::Agent` 是 child agent executor 的声明，不由 edge 执行。
 
 使用者：graph builder、graph runner、未来外部 node executor。
 
@@ -311,7 +311,7 @@
 
 职责：定义 edge 内容传输逻辑。
 
-内部逻辑：edge 从 `(source_node, output_port)` 读取未传输的 output log entries，按目标 input package 的 `MessageQuery` 过滤和投影，再写入目标 package。
+内部逻辑：edge 从 source node message log 读取未传输的新 messages，按目标 input package 的 `MessageQuery` 过滤和投影，再写入目标 package。
 
 交互：由 runtime 在扫描 edge 时调用；不执行 provider/tool/session，不管理循环数。
 
@@ -351,11 +351,11 @@
 
 ### `src/session/turn_loop.rs`
 
-职责：会话级用户消息缓冲和 turn 状态机。
+职责：会话级 push buffer、消息历史、GenInput、graph context 构建和 turn 状态机。
 
-内部逻辑：接收 user message、准备 turn、finish/abort turn、request stop；只管理会话级调度，不执行 graph。
+内部逻辑：`push` 接收 finalized message，`GenInput` 决定本轮 graph input/consumed/remaining，`PrepareGraph` 选择 graph，运行 graph 后通过 `OnTurnEvents` 消费事件并追加 graph 新消息。
 
-交互：输出 `TurnInput` 给外层 driver；不写 session，不构造 provider request。
+交互：常规入口是 `append_messages`、`push`、`run_once`、`run_pending` 和 `run_message`；不直接写 session，不构造 provider request。
 
 使用者：CLI/TUI/HTTP session driver、测试。
 
@@ -395,7 +395,7 @@
 
 内部逻辑：收集 summaries，并按最后一次 compaction 的边界选择需要保留的 messages。
 
-交互：context builder 使用 replay messages；session compaction 写入 compaction entry。
+交互：context builder 使用 replay 后得到的 `RunMessage` 列表；session compaction 写入 compaction entry。
 
 使用者：TurnLoop driver、context builder、测试。
 
@@ -435,9 +435,9 @@
 
 ### `src/llm/context.rs`
 
-职责：把 agent definition、replay messages、run messages、visible tools 转成 provider-neutral `LlmRequest`。
+职责：把 agent definition、messages、visible tools 转成 provider-neutral `LlmRequest`。
 
-内部逻辑：system prompt 转 `instructions`；typed `ContentBlock` 转 `LlmInputItem`；diagnostic 是否进入上下文由参数控制。
+内部逻辑：system prompt 转 `instructions`；`RunMessage` 原样进入 `LlmRequest.messages`；diagnostic 是否进入上下文由参数控制。typed `ContentBlock` 只在 provider adapter 最后一跳序列化成具体 API 字段。
 
 交互：读取 `AgentDefinition`、`RunMessage`、`ToolSchema`；输出给 `LlmRegistry/LlmProvider`。
 
@@ -457,7 +457,7 @@
 
 职责：定义 provider-neutral LLM request。
 
-内部逻辑：包含 model、api override、instructions、input items、tools、options、metadata、headers。
+内部逻辑：包含 model、api override、instructions、messages、tools、options、metadata、headers。
 
 交互：context builder 产出 request；provider adapter 读取 request 并转具体 API。
 
@@ -569,7 +569,7 @@
 
 职责：执行 tool call。
 
-内部逻辑：校验 visibility 和 arguments，执行 permission policy，调用 tool，把结果包装成 `ToolResult`。
+内部逻辑：校验 visibility 和 arguments，执行 permission policy，调用 tool；主执行入口直接返回 tool `RunMessage`，原始 `ToolResult` 只用于审计、状态判断和底层测试。
 
 交互：由 graph tool-execution node 调用；hook wrapper 后续可包住 execution。
 
@@ -579,7 +579,7 @@
 
 职责：定义 tool execution result 和到 core message 的映射。
 
-内部逻辑：success/denied/failed 统一携带 output/error/recoverable；`into_run_message()` 生成 typed `ContentBlock::ToolResult`。
+内部逻辑：success/denied/failed 统一携带 output/error/recoverable；tool executor 的 message 入口会自动生成 typed `ContentBlock::ToolResult`。
 
 交互：context builder 将 tool result message 转 provider function call output。
 

@@ -13,8 +13,8 @@
 - 使用 key/account 路由减少稳定 prefix 的缓存污染。
 - 验证复杂 task graph 和并行 tool call。
 
-这些能力属于 runtime/example 层。`agent-core` 只新增了两个通用扩展点：`ToolCapabilities.idempotent` 和
-`ToolExecutor::execute_batch_parallel()`。
+这些能力属于 runtime/example 层。`agent-core` 提供的通用扩展点是 `ToolCapabilities.idempotent` 和
+`ToolExecutor::execute_batch_parallel_messages()`；需要原始审计状态时仍可走低层 `execute_batch_parallel()`。
 
 ## 文件职责
 

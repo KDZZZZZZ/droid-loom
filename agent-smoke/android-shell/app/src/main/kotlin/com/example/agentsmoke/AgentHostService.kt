@@ -185,6 +185,11 @@ class AgentHostService : Service() {
                 updateStatus("Debug tool: $toolName\n$output")
             } catch (error: Throwable) {
                 Log.e(TAG, "Debug tool $toolName failed", error)
+                val failure = JSONObject()
+                    .put("ok", false)
+                    .put("error", error.message ?: error.javaClass.simpleName)
+                    .toString()
+                logDebugOutput(toolName, failure)
                 updateStatus("Debug tool error: ${error.message ?: error.javaClass.simpleName}")
             }
         }
@@ -197,21 +202,15 @@ class AgentHostService : Service() {
                 .put("ok", false)
                 .put("error", "Missing MIMO_API_KEY")
                 .toString()
-        val targetToolCalls = args.optInt("target_tool_calls", 100).coerceIn(1, 120)
-        val minimumRequiredToolCalls = args
-            .optInt("minimum_required_tool_calls", ((targetToolCalls * 95) + 99) / 100)
-            .coerceIn(1, targetToolCalls)
-        val reactSelfCheckInterval = args
-            .optInt("react_self_check_interval", args.optInt("loop_body_tool_calls", 10))
-            .coerceIn(4, 16)
-        val maxRounds = args.optInt("max_tool_rounds", 128).coerceIn(1, MAX_TOOL_ROUNDS)
+        val maxRounds = args.optInt("max_tool_rounds", 48).coerceIn(1, MAX_TOOL_ROUNDS)
         val taskName = args.optString(
             "task",
-            "real phone-using readiness audit across Settings, Wi-Fi, Launcher, and Agent Smoke"
+            "check emulator Settings and Wi-Fi readiness, write a handoff note, then return to Agent Smoke"
         )
         val macroTools = setOf(
             "android_map_goal_task",
             "android_map_long_task_smoke",
+            "android_map_mark_transition_failed",
             "android_map_stale_path_probe",
             "android_map_stale_page_refresh_probe"
         )
@@ -228,6 +227,7 @@ class AgentHostService : Service() {
         val toolCounts = linkedMapOf<String, Int>()
         val allToolNames = mutableListOf<String>()
         val toolArgumentTexts = mutableListOf<Pair<String, String>>()
+        val toolOutputs = mutableListOf<Pair<String, JSONObject>>()
         val toolTraceSample = JSONArray()
         var successfulNavigationToolCalls = 0
         var successfulObservationToolCalls = 0
@@ -252,47 +252,31 @@ class AgentHostService : Service() {
 
         fun graphLoopPrompt(): String {
             return """
-                You are executing one real phone-using evaluation graph named phone_readiness_react_eval.
+                You are operating a real Android emulator through primitive phone tools.
 
-                Graph:
-                start -> react_loop -> final_summary
+                User task:
+                $taskName
 
-                ReAct loop rule:
-                - react_loop is observe -> reason/decide -> act -> observe, repeated inside this single graph run.
-                - It is not a fixed action checklist. Do not repeat the same action sequence as a counter.
-                - Each tool call must advance a concrete audit subgoal, verify a changed phone state, recover navigation, update map memory, or write a useful artifact.
-                - Continue until this single graph run has produced at least $targetToolCalls provider-visible primitive tool calls and all required evidence is collected.
-                - To avoid ending early from an off-by-one count, aim for at least ${targetToolCalls + 8} provider-visible tool calls before final_summary.
-                - Every $reactSelfCheckInterval tool calls, mentally check which subgoals still lack evidence and choose the next tool accordingly.
-                - Do not use macro/debug tools. Only use primitive tools visible to you.
+                Work naturally. Do not optimize for a tool-call count. Stop when you have enough
+                evidence to answer the user task. Never claim a phone action happened unless a
+                tool result confirms it. Do not use macro/debug tools.
 
-                Real task objective:
-                Produce a device readiness brief for this Android emulator by using the phone, not by simulating progress.
-
-                Required audit subgoals:
-                1. Baseline: collect device model/API/package and battery level/charging state at the beginning and again near the end.
-                2. Agent workspace: open Agent Smoke, observe its accessibility/app-map state, and confirm the agent host can return to its workspace.
-                3. Settings root: open Android Settings, inspect the current UI tree, observe it into app-map memory, and search/plan the remembered Settings page.
-                4. Wi-Fi readiness: open Wi-Fi settings, inspect the UI tree, observe it into app-map memory, and compare it to the Settings root evidence.
-                5. Launcher recovery: go Home, inspect Launcher/System UI, and prove the agent can continue after leaving its own app.
-                6. Map memory: use android_map_observe, android_map_view, android_map_search, and android_map_plan_path to avoid re-exploring blindly.
-                7. Navigation recovery: use Home/Back/Open Settings/Open Agent as needed based on the observed state.
-                8. Artifacts: write at least three progressively richer readiness notes to clipboard.
-                9. Visible status: show at least three milestone toasts that correspond to real completed subgoals.
-                10. Final verification: before final_summary, re-read device/battery and current UI/map state.
-
-                If all subgoals are complete before $targetToolCalls calls, do not repeat a canned sequence. Continue by deepening missing evidence:
-                - inspect a different current screen representation with android_ui_state vs android_map_observe;
-                - search or plan for a different semantic target such as settings, wifi, launcher, or agent workspace;
-                - verify an artifact after a navigation change;
-                - recover from the current screen and observe the result.
+                Evidence to collect:
+                1. Read device info and battery state.
+                2. Open Android Settings and inspect the actual visible UI.
+                3. Open Wi-Fi settings and inspect the actual visible UI.
+                4. Update app-map memory from at least one observed screen, then consult that
+                   memory with a view, search, or path plan.
+                5. Go Home once, then return to Agent Smoke to prove navigation recovery.
+                6. Write one concise readiness handoff note to the clipboard.
+                7. Show one short visible status toast after the handoff note is written.
 
                 final_summary must answer in Chinese with:
-                - actual provider-visible tool call count
-                - whether macro tools were avoided
-                - which real audit subgoals were completed
-                - navigation/observation/device-read/artifact coverage
-                - final device readiness conclusion
+                - what you verified in Settings and Wi-Fi
+                - device and battery facts you observed
+                - what handoff note you wrote
+                - whether you returned to Agent Smoke
+                - final readiness conclusion
             """.trimIndent()
         }
 
@@ -311,6 +295,7 @@ class AgentHostService : Service() {
                 } catch (_: Throwable) {
                     JSONObject()
                 }
+                toolOutputs.add(trace.name to outputJson)
                 if (outputJson.optBoolean("ok", false)) {
                     when (trace.name) {
                         in navigationTools -> successfulNavigationToolCalls += 1
@@ -342,7 +327,7 @@ class AgentHostService : Service() {
 
         val response = try {
             taskAgent.reset()
-            updateStatus("Provider phone graph: target $targetToolCalls primitive tool calls")
+            updateStatus("Provider phone task: $taskName")
             taskAgent.promptWithToolsLimit(graphLoopPrompt(), maxRounds.toUInt())
         } finally {
             taskAgent.close()
@@ -364,66 +349,69 @@ class AgentHostService : Service() {
             toolArgumentTexts.any { (name, arguments) ->
                 name == toolName && arguments.contains(value)
             }
-        val subgoalCoverage = linkedMapOf(
-            "baseline_device_and_battery" to (
-                (toolCounts["android_device_info"] ?: 0) >= 2 &&
-                    (toolCounts["android_battery"] ?: 0) >= 2
+        fun outputsFor(toolName: String): List<JSONObject> =
+            toolOutputs.filter { (name, _) -> name == toolName }.map { (_, output) -> output }
+        fun successfulOutput(toolName: String): Boolean =
+            outputsFor(toolName).any { output -> output.optBoolean("ok", false) }
+        fun outputContains(toolName: String, value: String): Boolean =
+            outputsFor(toolName).any { output ->
+                output.toString().contains(value, ignoreCase = true)
+            }
+        fun clipboardHandoffWritten(): Boolean =
+            outputsFor("android_set_clipboard").any { output ->
+                output.optBoolean("ok", false) && output.optString("text").trim().length >= 12
+            }
+
+        val settingsRequested = outputsFor("android_open_settings")
+            .any { output -> output.optBoolean("ok", false) && output.optString("screen") == "settings" }
+        val wifiRequested = outputsFor("android_open_settings")
+            .any { output -> output.optBoolean("ok", false) && output.optString("screen") == "wifi" }
+        val settingsUiObserved = settingsRequested &&
+            (outputContains("android_ui_state", "com.android.settings") ||
+                outputContains("android_ui_state", "settings"))
+        val wifiUiObserved = wifiRequested &&
+            (outputContains("android_ui_state", "wifi") ||
+                outputContains("android_ui_state", "network") ||
+                outputContains("android_ui_state", "com.android.settings"))
+        val mapMemoryConsulted =
+            successfulOutput("android_map_view") ||
+                successfulOutput("android_map_search") ||
+                successfulOutput("android_map_plan_path")
+        val requiredEvidence = linkedMapOf(
+            "provider_returned_answer" to response.answer.trim().isNotEmpty(),
+            "primitive_tool_used" to allToolNames.any { it !in macroTools },
+            "macro_tools_absent" to (macroToolCalls == 0),
+            "device_state_checked" to (
+                successfulOutput("android_device_info") &&
+                    successfulOutput("android_battery")
                 ),
-            "agent_workspace_return" to ((toolCounts["android_open_agent"] ?: 0) >= 1),
-            "settings_root_inspected" to hasArgument("android_open_settings", "settings"),
-            "wifi_inspected" to hasArgument("android_open_settings", "wifi"),
-            "launcher_recovery" to hasArgument("android_global_action", "home"),
-            "map_memory_used" to (
-                (toolCounts["android_map_observe"] ?: 0) >= 8 &&
-                    (
-                        (toolCounts["android_map_view"] ?: 0) > 0 ||
-                            (toolCounts["android_map_search"] ?: 0) > 0
-                        ) &&
-                    (toolCounts["android_map_plan_path"] ?: 0) > 0
+            "settings_ui_observed" to settingsUiObserved,
+            "wifi_ui_observed" to wifiUiObserved,
+            "app_map_memory_used" to (
+                successfulOutput("android_map_observe") &&
+                    mapMemoryConsulted
                 ),
-            "raw_ui_inspected" to ((toolCounts["android_ui_state"] ?: 0) >= 2),
-            "clipboard_artifact_written" to ((toolCounts["android_set_clipboard"] ?: 0) >= 3),
-            "visible_status_shown" to ((toolCounts["android_show_toast"] ?: 0) >= 3),
-            "final_verification_pass" to (
-                allToolNames.takeLast(24).contains("android_device_info") &&
-                    allToolNames.takeLast(24).contains("android_battery") &&
-                    allToolNames.takeLast(24).any { it in observationTools }
-                )
+            "home_navigation_used" to (
+                outputsFor("android_global_action")
+                    .any { output -> output.optBoolean("ok", false) && output.optString("action") == "home" }
+                ),
+            "returned_to_agent_app" to (
+                successfulOutput("android_open_agent") ||
+                    outputContains("android_ui_state", packageName)
+                ),
+            "clipboard_handoff_written" to clipboardHandoffWritten(),
+            "visible_status_shown" to successfulOutput("android_show_toast")
         )
-        val subgoalCoverageCount = subgoalCoverage.values.count { it }
         val repeatedFixedLoop = repeatedFixedActionLoop(allToolNames, 10)
-        val completed = allToolNames.size >= minimumRequiredToolCalls
+        val completed = requiredEvidence.values.all { it }
         val meaningfulPhoneTask = completed &&
-            macroToolCalls == 0 &&
-            navigationToolCalls >= 10 &&
-            observationToolCalls >= 30 &&
-            artifactToolCalls >= 6 &&
-            deviceReadToolCalls >= 4 &&
-            successfulNavigationToolCalls >= 10 &&
-            successfulObservationToolCalls >= 20 &&
-            successfulArtifactToolCalls >= 6 &&
-            successfulDeviceReadToolCalls >= 4 &&
-            toolCounts.size >= 10 &&
-            argumentSignatureCount >= 30 &&
-            subgoalCoverageCount >= 8 &&
             !repeatedFixedLoop
         val validation = JSONObject()
-            .put("target_tool_calls_met", completed)
-            .put("strict_target_tool_calls_met", allToolNames.size >= targetToolCalls)
-            .put("minimum_required_tool_calls_met", completed)
+            .put("required_evidence_met", completed)
             .put("macro_tools_absent", macroToolCalls == 0)
-            .put("navigation_tool_calls_ok", navigationToolCalls >= 10)
-            .put("observation_tool_calls_ok", observationToolCalls >= 30)
-            .put("artifact_tool_calls_ok", artifactToolCalls >= 6)
-            .put("device_read_tool_calls_ok", deviceReadToolCalls >= 4)
-            .put("successful_navigation_tool_calls_ok", successfulNavigationToolCalls >= 10)
-            .put("successful_observation_tool_calls_ok", successfulObservationToolCalls >= 20)
-            .put("successful_artifact_tool_calls_ok", successfulArtifactToolCalls >= 6)
-            .put("successful_device_read_tool_calls_ok", successfulDeviceReadToolCalls >= 4)
-            .put("unique_tool_count_ok", toolCounts.size >= 10)
-            .put("argument_signature_count_ok", argumentSignatureCount >= 30)
-            .put("subgoal_coverage_ok", subgoalCoverageCount >= 8)
             .put("not_fixed_action_loop", !repeatedFixedLoop)
+        val evidence = JSONObject()
+        requiredEvidence.forEach { (name, covered) -> evidence.put(name, covered) }
         val graph = JSONObject()
             .put("run_type", "single_graph_loop")
             .put("name", "phone_readiness_eval")
@@ -442,13 +430,9 @@ class AgentHostService : Service() {
                 "loop",
                 JSONObject()
                     .put("node", "react_loop")
-                    .put("self_check_interval_tool_calls", reactSelfCheckInterval)
-                    .put("target_tool_calls", targetToolCalls)
                     .put("observed_tool_calls", allToolNames.size)
-                    .put("exit_condition", "actual_tool_calls >= target_tool_calls")
+                    .put("exit_condition", "required evidence collected and final_summary returned")
             )
-        val coverage = JSONObject()
-        subgoalCoverage.forEach { (name, covered) -> coverage.put(name, covered) }
 
         return JSONObject()
             .put("ok", meaningfulPhoneTask)
@@ -456,8 +440,6 @@ class AgentHostService : Service() {
             .put("graph", graph)
             .put("completed", completed)
             .put("meaningful_phone_task", meaningfulPhoneTask)
-            .put("target_tool_calls", targetToolCalls)
-            .put("minimum_required_tool_calls", minimumRequiredToolCalls)
             .put("actual_tool_calls", allToolNames.size)
             .put("provider_tool_traces", allToolNames.size)
             .put("primitive_tool_traces", allToolNames.size - macroToolCalls)
@@ -472,10 +454,8 @@ class AgentHostService : Service() {
             .put("successful_device_read_tool_calls", successfulDeviceReadToolCalls)
             .put("unique_tool_count", toolCounts.size)
             .put("argument_signature_count", argumentSignatureCount)
-            .put("task_subgoal_coverage_count", subgoalCoverageCount)
-            .put("task_subgoal_coverage", coverage)
+            .put("required_evidence", evidence)
             .put("repeated_fixed_action_loop", repeatedFixedLoop)
-            .put("react_self_check_interval", reactSelfCheckInterval)
             .put("message_count", response.messageCount.toLong())
             .put("input_tokens", response.inputTokens.toLong())
             .put("output_tokens", response.outputTokens.toLong())
@@ -637,7 +617,7 @@ class AgentHostService : Service() {
         private const val EXTRA_DEBUG_INPUT = "debug_input"
         private const val EXTRA_DEBUG_INPUT_BASE64 = "debug_input_base64"
         private const val MAX_STATUS_CHARS = 1200
-        private const val LOG_CHUNK_CHARS = 3500
+        private const val LOG_CHUNK_CHARS = 900
         private const val TAG = "AgentHostService"
         private const val DEFAULT_TOOL_ROUNDS = 8
         private const val MAX_TOOL_ROUNDS = 128

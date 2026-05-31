@@ -147,7 +147,7 @@ let registry = Arc::new(registry);
 let executor = ToolExecutor::new(registry.clone());
 ```
 
-用户输入通过 core message API 构造：
+用户输入通过 core message API 构造。纯文本可以直接用 `RunMessage::user_text()`；带截图、文件或音频时再传 `ContentBlock`：
 
 ```rust
 let user_message = user_input::content_blocks_message(vec![
@@ -177,7 +177,7 @@ let user_message = user_input::content_blocks_message(vec![
 
 ```rust
 let mut input = ContextBuildInput::new("mimo-v2.5-pro");
-input.run_messages = messages;
+input.extend_messages(messages);
 input.visible_tool_schemas = direct_schemas.to_vec();
 
 let request = ContextBuilder::new().build(definition, input)?;
@@ -203,11 +203,7 @@ let request = ContextBuilder::new().build(definition, input)?;
 scripted probe 中批量执行工具：
 
 ```rust
-let tool_results = executor.execute_batch(&definition, tool_calls)?;
-let tool_messages = tool_results
-    .iter()
-    .map(|result| result.into_run_message())
-    .collect::<AgentCoreResult<Vec<_>>>()?;
+let tool_messages = executor.execute_batch_messages(&definition, tool_calls)?;
 ```
 
 百步任务中，每一步都构造 core `ToolCall`：
@@ -222,23 +218,17 @@ ToolCall::new(format!("type-note-{order_index}"), "type", json!({"text": text, "
 最终统一走：
 
 ```rust
-let result = executor.execute_one(definition, call.clone())?;
-if result.status != ToolResultStatus::Success {
-    return Err(AgentCoreError::Recoverable(...));
-}
+let tool_message = executor.execute_one_message(definition, call.clone())?;
 ```
 
 这里用到的 core API：
 
 - `ToolCall`
-- `ToolExecutor::execute_one`
-- `ToolExecutor::execute_batch`
-- `ToolExecutor::execute_batch_parallel`
-- `ToolResult`
-- `ToolResultStatus`
-- `ToolResult::into_run_message`
+- `ToolExecutor::execute_one_message`
+- `ToolExecutor::execute_batch_messages`
+- `ToolExecutor::execute_batch_parallel_messages`
 
-关键点：复杂任务负责规划和构造动作，真正执行、visibility check、schema validation、permission decision 和 result wrapping 都由 core 完成。
+关键点：复杂任务负责规划和构造动作，真正执行、visibility check、schema validation、permission decision 和 tool-result message 包装都由 core 完成。只有需要审计原始状态时才退回 `execute_one()` 读取 `ToolResult`。
 
 ### 6. Session 只记录 message 轨迹
 
@@ -306,7 +296,6 @@ let preexecution_outcome = TrajectoryProbabilityGraph::execute_preexecution_plan
 - `AgentDefinition`
 - `ToolCall`
 - `ToolExecutor`
-- `ToolResult::into_run_message`
 
 概率图本身不是 core 类型。它是 example/runtime 层逻辑，但输入输出都围绕 core 的 message 和 tool API。
 
@@ -374,7 +363,7 @@ let stable_routed = key_route_plan.apply(request, &prefix_id, &resolver)?;
 
 约束：真实 key 只能进入发送前 header，不能进入 request metadata、provider body、session message、测试 fixture 或文档。
 
-### 11. Graph 和 AgentFactory 验证复杂编排
+### 11. Graph 和 TurnLoop 验证复杂编排
 
 文件：
 
@@ -389,7 +378,7 @@ let graph = Graph::builder("mobilerun_fast_turn")
         "mobilerun_agent",
         InputPackageSpec::new("context")
             .required("instruction", MessageQuery::any(), Cardinality::Latest),
-    ).output("tool_calls"))
+    ))
     .node(GraphNode::final_node(
         "done",
         InputPackageSpec::new("calls").required(
@@ -398,16 +387,15 @@ let graph = Graph::builder("mobilerun_fast_turn")
             Cardinality::Latest,
         ),
     ))
-    .edge("input_to_agent", ("input", "messages"), ("agent_turn", "context"))
-    .edge("agent_to_done", ("agent_turn", "tool_calls"), ("done", "calls"))
+    .edge("input_to_agent", "input", ("agent_turn", "context"))
+    .edge("agent_to_done", "agent_turn", ("done", "calls"))
     .finish_at("done")
     .build()?;
 
-let services = AgentServices {
-    graph_runner: GraphRunner::with_executor(Arc::new(scripted_executor)),
-};
-let agent = AgentFactory::new(services).create(definition.clone())?;
-let result = agent.run(AgentRunInput::new(graph).with_initial_messages(vec![user_message]))?;
+let mut turn_loop = TurnLoop::with_executor(Arc::new(scripted_executor))
+    .with_graph(graph)
+    .with_max_ticks(10_000);
+let result = turn_loop.run_message(user_message)?;
 ```
 
 这里用到的 core API：
@@ -418,10 +406,8 @@ let result = agent.run(AgentRunInput::new(graph).with_initial_messages(vec![user
 - `InputPackageSpec`
 - `MessageQuery`
 - `NodeExecutor`
-- `GraphRunner`
-- `AgentFactory`
-- `AgentRunInput`
-- `AgentRunResult`
+- `TurnLoop`
+- `TurnRunResult`
 - `CoreEvent`
 
 当前真实百步 phone-using 的 ReAct loop 在 Android smoke 线中验证；boundary graph probe 主要验证 core graph 编排能力。
@@ -453,14 +439,14 @@ pub fn run_hundred_step_cross_app_task(
 
 ```rust
 let view = map.local_view(Some(page), 1, None);
-let result = executor.execute_one(definition, call.clone())?;
+let tool_message = executor.execute_one_message(definition, call.clone())?;
 report.step_count += 1;
 ```
 
 这就是“真实复杂任务使用 core”的最小闭环：
 
 ```text
-AppMapMemory -> CandidateAction -> ToolCall -> ToolExecutor -> ToolResult -> CrossAppTaskReport
+AppMapMemory -> CandidateAction -> ToolCall -> ToolExecutor -> RunMessage(role=tool) -> CrossAppTaskReport
 ```
 
 ## Android Smoke 如何使用 core

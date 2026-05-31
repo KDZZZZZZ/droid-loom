@@ -25,8 +25,6 @@ pub fn default_react_graph() -> AgentCoreResult<Graph> {
                         Cardinality::Latest,
                     ),
             )
-            .output("tool_calls")
-            .output("final")
             .concurrency(NodeConcurrency::Serial),
         )
         .node(
@@ -34,7 +32,6 @@ pub fn default_react_graph() -> AgentCoreResult<Graph> {
                 "tool",
                 "dispatch_tool_call",
                 "tool_call",
-                "results",
                 InputPackageSpec::new("calls").required(
                     "tool_call",
                     MessageQuery::where_eq("content[*].type", "tool_call"),
@@ -51,14 +48,10 @@ pub fn default_react_graph() -> AgentCoreResult<Graph> {
                 Cardinality::Latest,
             ),
         ))
-        .edge(
-            "input_to_agent",
-            ("input", "messages"),
-            ("agent", "context"),
-        )
-        .edge("agent_to_tool", ("agent", "tool_calls"), ("tool", "calls"))
-        .edge("tool_to_agent", ("tool", "results"), ("agent", "context"))
-        .edge("agent_to_final", ("agent", "final"), ("final", "answer"))
+        .edge("input_to_agent", "input", ("agent", "context"))
+        .edge("agent_to_tool", "agent", ("tool", "calls"))
+        .edge("tool_to_agent", "tool", ("agent", "context"))
+        .edge("agent_to_final", "agent", ("final", "answer"))
         .finish_at("final")
         .build()
 }
@@ -81,11 +74,7 @@ pub fn single_node_graph(
                 Cardinality::Latest,
             ),
         ))
-        .edge(
-            "input_to_node",
-            ("input", "messages"),
-            (node_id.clone(), "input"),
-        )
+        .edge("input_to_node", "input", (node_id.clone(), "input"))
         .finish_at(node_id)
         .build()
 }

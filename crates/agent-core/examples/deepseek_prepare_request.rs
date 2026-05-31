@@ -17,11 +17,9 @@ fn main() -> AgentCoreResult<()> {
         .build()?;
 
     let mut input = ContextBuildInput::new("deepseek-v4-flash");
-    input
-        .run_messages
-        .push(RunMessage::user(vec![ContentBlock::text(
-            "用一句话解释 agent graph。",
-        )])?);
+    input.push_message(RunMessage::user(vec![ContentBlock::text(
+        "用一句话解释 agent graph。",
+    )])?);
     input.visible_tool_schemas.push(ToolSchema::new(
         "lookup_notes",
         "Search local notes",
