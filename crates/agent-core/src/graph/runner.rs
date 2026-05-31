@@ -186,6 +186,7 @@ impl From<rt::GraphRunStatus> for GraphRunStatus {
         match value {
             rt::GraphRunStatus::Completed => Self::Completed,
             rt::GraphRunStatus::Drained => Self::Drained,
+            rt::GraphRunStatus::Cancelled => Self::Cancelled,
             rt::GraphRunStatus::BudgetExceeded => Self::BudgetExceeded,
             rt::GraphRunStatus::Failed => Self::Failed,
         }

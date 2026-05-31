@@ -226,11 +226,12 @@ edge 每次处理自己的 source output log：
 2. 对每条 `OutputLogEntry`，读取 target node 的 `InputPackageSpec`。
 3. 用 package 的 required/optional items 逐个匹配该 message。
 4. 如果没有任何 item 匹配，只推进 `next_seq`，不写 package，不写 transfer ledger。
-5. 如果某个 item 匹配，按 `query.select` 取字段并计算 `selected_hash`。
+5. 如果某个 item 匹配，按 `query.select` 取字段并计算 `selected_hash`。当 query 命中 `content[*]` 的某个 block 时，`content[*]` 选择只暴露匹配的 blocks。
 6. 生成 `DeliveryKey(edge, package, item, message_id, selected_hash)`。
 7. 如果 key 已经在 `EdgeState.delivered`，跳过。
-8. 如果 key 没出现过，写入 `PackageState.items[item]`，递增 package version，记录 transfer ledger。
-9. 处理完该 output entry 后推进 `next_seq`。
+8. 如果 key 没出现过，写入 `PackageState.items[item]`，记录 transfer ledger。
+9. 同一个 output entry 的所有新 matched content 写完后，package version 只递增一次。
+10. 处理完该 output entry 后推进 `next_seq`。
 
 关键约束：
 
@@ -365,7 +366,7 @@ let graph = GraphSpec::builder("phone_react")
         "agent",
         "phone_agent",
         InputPackageSpec::new("context")
-            .required("turn", MessageQuery::any(), Cardinality::Latest)
+            .required("turn", MessageQuery::where_eq("role", "user"), Cardinality::Latest)
             .optional("tool_result",
                 MessageQuery::where_eq("content[*].type", "tool_result")
                     .select(["id", "role", "content[*]"]),
@@ -596,23 +597,17 @@ edge scan 和 package matching 在 node future 完成后立刻继续运行，因
 
 ## 必须覆盖的测试
 
-1. `edge_scans_only_unseen_output_log_entries`
-2. `edge_does_not_treat_filtered_message_as_new_content`
-3. `edge_delivers_matched_content_once`
-4. `message_version_change_without_selected_field_change_does_not_activate`
-5. `required_latest_item_implements_any_update`
-6. `package_requires_all_required_items`
-7. `package_includes_optional_items_without_blocking`
-8. `ready_package_version_creates_one_activation`
-9. `serial_node_does_not_run_two_activations_concurrently`
-10. `parallel_nodes_can_run_concurrently`
-11. `slow_node_future_does_not_block_independent_ready_node`
-12. `single_tool_node_executes_without_agent_inline_dispatch`
-13. `tool_dispatcher_node_reads_tool_call_package_item`
-14. `agent_node_executes_as_first_class_node`
-15. `agent_node_receives_tool_result_through_self_graph`
-16. `react_graph_runs_agent_tool_agent_final_without_special_loop`
-17. `ledger_records_edge_transfer_and_node_attempts`
+`crates/agent-core/src/graph/runtime.rs` 覆盖以下测试场景：
+
+- Edge / Log：`edge_scans_only_unseen_entries`、`edge_ignores_unmatched_message`、`edge_delivers_matched_content_once`、`same_message_version_changed_but_selected_unchanged_no_activation`、`same_message_selected_field_changed_triggers_activation`、`different_message_same_selected_hash_still_delivered`。
+- Input Package：`required_item_latest_materializes_only_latest`、`required_item_at_least_waits_until_enough_matches`、`multiple_required_items_all_must_be_ready`、`optional_item_does_not_block_ready`、`optional_item_included_when_available`、`filtered_content_does_not_increment_package_version`、`package_version_changes_once_per_new_matched_content_batch`。
+- Source / Query：`agent_turn_query_does_not_match_tool_result`、`query_select_masks_unselected_fields_from_node_input`、`query_path_content_array_matches_nested_block`、`query_multiple_blocks_selects_only_matching_blocks`。
+- Node Activation：`ready_package_creates_one_activation_per_version`、`new_package_version_creates_new_activation`、`node_not_activated_when_package_ready_but_version_unchanged`、`serial_node_prevents_concurrent_activations`、`parallel_node_allows_up_to_max`、`by_key_limits_concurrency_per_key`。
+- Runtime Loop：`runtime_finishes_when_final_node_commits_output`、`runtime_does_not_finish_when_final_package_ready_but_node_not_run`、`runtime_returns_no_progress_when_no_running_no_activation_no_transfer`、`slow_node_does_not_block_independent_ready_node`、`edge_scan_continues_after_node_output_commit`。
+- ReAct：`react_runs_agent_tool_agent_final_without_special_loop`、`agent_tool_call_routes_only_to_tool_node`、`agent_final_routes_only_to_final_node`、`tool_result_routes_back_to_agent_context`、`react_stops_on_final_even_if_previous_tool_results_exist`、`react_budget_stops_infinite_tool_loop`。
+- Tool / Agent Executor：`tool_dispatcher_reads_call_item_and_emits_results_port`、`tool_node_preserves_call_id_in_result`、`tool_error_still_emits_tool_result_message`、`agent_node_receives_package_snapshot_not_live_state`。
+- Cancel / Deadline / Error：`cancel_running_node_marks_graph_cancelled`、`deadline_exceeded_stops_new_activation`、`node_executor_error_records_attempt_and_policy_decides_status`、`recoverable_tool_error_can_continue_react`。
+- Ledger / Replay：`ledger_records_edge_transfer`、`ledger_records_node_attempt_start_finish_status`、`replay_from_logs_reconstructs_package_state`、`deterministic_scan_order_produces_stable_activation_order`。
 
 ## 结论
 

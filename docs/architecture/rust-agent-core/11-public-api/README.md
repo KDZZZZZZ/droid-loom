@@ -331,7 +331,7 @@ let graph = Graph::builder("phone_react")
         "agent",
         "phone_agent",
         InputPackageSpec::new("context")
-            .required("turn", MessageQuery::any(), Cardinality::Latest)
+            .required("turn", MessageQuery::where_eq("role", "user"), Cardinality::Latest)
             .optional(
                 "tool_result",
                 MessageQuery::where_eq("content[*].type", "tool_result"),
@@ -424,7 +424,7 @@ let package = InputPackageSpec::new("context")
 
 #### `MessageQuery`
 
-筛选 message 及其字段。被 query 筛掉的 message 不进入 package，也不算新内容；选择字段的 hash 不变时，不会重复推进 package version。
+筛选 message 及其字段。被 query 筛掉的 message 不进入 package，也不算新内容；选择字段的 hash 不变时，不会重复推进 package version。对于 `content[*]` 查询，select 只暴露匹配的 content blocks。
 
 ```rust
 use agent_core::graph_node::{FieldOp, MessageQuery};

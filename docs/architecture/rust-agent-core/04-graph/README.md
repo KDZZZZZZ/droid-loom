@@ -21,8 +21,10 @@ TurnLoop 是会话级调度，不放在本文。TurnLoop、session tree、持久
 - required items 全满足后，node 可以解锁运行；
 - optional items 不阻塞解锁，但会作为上下文传入 node；
 - package version 变化后，runtime 会重新判断是否需要激活 node；
+- 同一条 output entry 同时匹配多个 package items 时，所有 matched content 写入后 package version 只递增一次；
 - 被 query 筛掉的 message 不进入 package，也不算新内容；
-- selected fields 的 hash 不变时，同一 edge 不重复传输。
+- selected fields 的 hash 不变时，同一 edge 不重复传输；
+- `content[*]` query 命中某个 block 时，select 只暴露匹配 blocks，不把同一 message 的其它 blocks 混入下游。
 
 edge 的职责只有一件事：把某个 output ref 的新 message 按目标 package spec 过滤、投影、去重后，写入目标 package。
 
@@ -111,7 +113,7 @@ tool.results -> agent.context
 agent.final -> final.answer
 ```
 
-agent node 通过 `context` package 同时接收用户 turn 和工具结果。tool node 单独接收 `tool_calls` port 上的工具调用。final node 接收 `agent.final` port 上的最终回答。
+agent node 通过 `context` package 同时接收用户 turn 和工具结果；用户 turn 应用 `role == "user"` query，避免被 tool result 覆盖。tool node 单独接收 `tool_calls` port 上的工具调用。final node 接收 `agent.final` port 上的最终回答。
 
 这不是特殊循环。ReAct loop 只是 graph 中的普通回边：
 
@@ -132,7 +134,7 @@ graph run 在以下情况停止：
 - `finish_at` 指向的 final node 完成，状态为 `Completed`；
 - 没有 activations、没有 running futures，状态为 `Drained`；
 - `GraphRunInput.max_ticks` 超限，状态为 `BudgetExceeded`；
-- node executor 返回错误，状态为 `Failed`；
+- node executor 返回错误，状态为 `Failed`；如果 executor 明确返回 cancellation error，状态为 `Cancelled`；
 - `GraphRunner` 收到启动前 stop request，状态为 `Cancelled`。
 
 ## 不变量

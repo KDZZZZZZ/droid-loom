@@ -14,7 +14,11 @@ pub fn default_react_graph() -> AgentCoreResult<Graph> {
                 "agent",
                 "default_agent",
                 InputPackageSpec::new("context")
-                    .required("turn", MessageQuery::any(), Cardinality::Latest)
+                    .required(
+                        "turn",
+                        MessageQuery::where_eq("role", "user"),
+                        Cardinality::Latest,
+                    )
                     .optional(
                         "tool_result",
                         MessageQuery::where_eq("content[*].type", "tool_result"),
