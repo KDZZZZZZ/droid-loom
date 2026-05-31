@@ -39,7 +39,7 @@
 | `ToolExecutionEvent` | `HookEmitted(name="tool_execution")` 投影 | `event stream projection - tool_events=16` | simulated |
 | recoverable provider/tool error | wrapper handler 返回 `WrapperResult::Recover { messages }` | `handler hooks - recover_messages=1` | supported |
 | structured output | 示例外部 JSON shape validator | `structured final output` | simulated |
-| `max_steps` | prompt 中渲染，graph budget 用 `GraphStateBudget` 单独验证 | `budget_guard=budget_exceeded` | supported |
+| `max_steps` | prompt 中渲染，graph runtime 用 tick budget 单独验证 | `budget_guard=budget_exceeded` | supported |
 | workflow timeout | tool metadata 有 `timeout_ms`，executor 未强制计时 | Known core gaps | gap |
 | per-role LLMs (`manager`/`executor`/`fast_agent`) | 可由外部 runtime 对不同 `LlmRequest.model` 赋值；本示例只构建 provider-neutral request | `context builder - model=mimo-v2.5-pro` | simulated |
 | driver/state provider | Android/iOS/browser shell 负责，不进入 core | README 当前边界 | external |
@@ -59,7 +59,7 @@
 | Task 绑定上下文 | `TaskDependencyGraph` 只继承依赖任务 artifacts，不继承中间工具噪声 | `task-bound context dag` | supported |
 | 地图局部视野降耗 | `local_view()` 只给当前页面附近几跳和任务相关入口，不把整图塞进 prompt | `local_map_tokens=12913 vs full_map_tokens=45140` | supported |
 | 地图动态维护 | 路径失败多次后标记 stale，`forget()` 可按 query/page/stale 删除 | `stale_paths_after_failures=1`, `forget_removed=1` | supported |
-| 复杂图验证 | 多 start node + fan-out/fan-in 风格 graph 通过 `GraphRunner` 跑通 | `complex task graph - status=completed` | supported |
+| 复杂图验证 | task/dependency package 解锁两个并行工具 node，fan-in 到 manager package 后完成 final node | `complex task graph - status=completed` | supported |
 | 并行工具调用 | `ToolExecutor::execute_batch_parallel()` 并行执行且保持结果顺序 | `parallel tool execution - parallel_results=2` | supported |
 
 ## 使用方案
@@ -97,6 +97,6 @@ cargo test -p mobilerun-agent-boundary
 
 - 要支持真实 credential vault，只新增外部 credential adapter；core 仍只看到 `type_secret(secret_id, index)` 和 redacted tool result。
 - 要支持实时 event subscription，优先在 runtime facade 增加 event sink；不要让 event subscriber 直接修改 graph state。
-- 要支持 provider/tool node 自动执行，应沿 `GraphNodeAction::Agent` / custom node executor 的可拓展点实现，不把 provider/tool 逻辑塞进 edge。
+- 要支持 provider/tool/agent node 自动执行，应沿 `NodeExecutor` / executor registry 的可拓展点实现，不把 provider/tool 逻辑塞进 edge。
 - 要支持 workflow timeout，优先在 runtime/tool execution wrapper 层做 deadline enforcement；不要让 tool schema 自己管理时间。
 - 要支持结构化输出，先作为 context/provider 后处理器或 wrapper handler；不要把 Pydantic/JSON schema validator 写死进 message 层。

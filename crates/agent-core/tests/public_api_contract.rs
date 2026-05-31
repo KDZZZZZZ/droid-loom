@@ -7,10 +7,12 @@ use agent_core::context::{
 };
 use agent_core::event::{CoreEvent, EventLog};
 use agent_core::graph::Graph;
-use agent_core::graph_edge::{ActivationCondition, ContextInheritPolicy, EdgeDecision, GraphEdge};
-use agent_core::graph_node::{GraphNode, GraphNodeAction, NodeExecutionInput};
+use agent_core::graph_edge::{GraphEdge, OutputRef, PackageRef};
+use agent_core::graph_node::{
+    Cardinality, GraphNode, InputPackageSpec, MessageQuery, NodeConcurrency, NodeKind,
+};
 use agent_core::graph_runner::{GraphRunInput, GraphRunStatus, GraphRunner};
-use agent_core::graph_state::{FiredEdgeRecord, GraphState, GraphStateBudget};
+use agent_core::graph_runtime as graph_rt;
 use agent_core::graph_templates::{default_react_graph, single_node_graph};
 use agent_core::hook::{
     HookEventRequest, HookKind, HookName, HookPayload, PointHookDecision, WrapperRequest,
@@ -50,6 +52,8 @@ use agent_core::tool_schema::{validate_tool_name, ToolSchema};
 use agent_core::turn_loop::{TurnLoop, TurnLoopState};
 use agent_core::user_input;
 use agent_core::{AgentCoreError, AgentCoreResult, AgentDefinition, AgentFactory, AgentServices};
+use futures::executor::block_on;
+use futures::future::BoxFuture;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -130,6 +134,30 @@ impl LlmProvider for MockProvider {
     }
 }
 
+#[derive(Debug)]
+struct ContractRuntimeExecutor;
+
+impl graph_rt::NodeExecutor for ContractRuntimeExecutor {
+    fn execute(
+        &self,
+        node: graph_rt::NodeSpec,
+        _input: graph_rt::NodeInput,
+        _ctx: graph_rt::NodeExecutionContext,
+    ) -> BoxFuture<'static, AgentCoreResult<graph_rt::NodeOutput>> {
+        Box::pin(async move {
+            let output = match node.kind {
+                graph_rt::NodeKind::Final => graph_rt::NodeOutput::new(),
+                _ => {
+                    let message = RunMessage::assistant(vec![ContentBlock::text("runtime")])?
+                        .with_metadata("kind", json!(node.id.clone()));
+                    graph_rt::NodeOutput::new().with_message("out", message)
+                }
+            };
+            Ok(output)
+        })
+    }
+}
+
 fn contract_definition() -> AgentCoreResult<AgentDefinition> {
     AgentDefinitionBuilder::new()
         .name("contract-agent")
@@ -142,15 +170,16 @@ fn contract_definition() -> AgentCoreResult<AgentDefinition> {
 
 fn passthrough_graph() -> AgentCoreResult<Graph> {
     Graph::builder("contract_graph")
-        .node(
-            GraphNode::new("start")
-                .with_label("Start")
-                .with_action(GraphNodeAction::PassthroughInput)
-                .terminal(true),
-        )
-        .start_node("start")
-        .end_node("start")
-        .budget(GraphStateBudget::unlimited())
+        .node(GraphNode::final_node(
+            "final",
+            InputPackageSpec::new("input").required(
+                "turn",
+                MessageQuery::any(),
+                Cardinality::Latest,
+            ),
+        ))
+        .edge("input_to_final", ("input", "messages"), ("final", "input"))
+        .finish_at("final")
         .build()
 }
 
@@ -344,113 +373,198 @@ fn tool_public_api_contract() -> AgentCoreResult<()> {
 
 #[test]
 fn graph_public_api_contract() -> AgentCoreResult<()> {
-    let source_message = RunMessage::assistant(vec![ContentBlock::text("go")])?;
-    let source = GraphNode::new("source")
-        .with_label("Source")
-        .with_action(GraphNodeAction::EmitMessages(vec![source_message.clone()]));
-    assert_eq!(source.id(), "source");
-    assert_eq!(source.label(), Some("Source"));
-    assert!(matches!(source.action(), GraphNodeAction::EmitMessages(_)));
-    assert!(!source.is_terminal());
-
-    let node_result = GraphNode::new("manual").execute(NodeExecutionInput::default(), |_| {
-        unreachable!("noop node must not emit messages")
-    })?;
-    assert_eq!(node_result.node_id, "manual");
-
-    let edge = GraphEdge::new("source_to_target", "source", "target")
-        .with_inherit_policy(ContextInheritPolicy::Full)
-        .with_activation_condition(ActivationCondition::MessageHasText)
-        .with_priority(10);
-    assert_eq!(edge.id(), "source_to_target");
-    assert_eq!(edge.source_node_id(), "source");
-    assert_eq!(edge.target_node_id(), "target");
-    assert!(matches!(edge.inherit_policy(), ContextInheritPolicy::Full));
-    assert!(matches!(
-        edge.activation_condition(),
-        ActivationCondition::MessageHasText
-    ));
-    assert_eq!(edge.priority(), 10);
-
-    let mut state = GraphState::new(Uuid::new_v4(), GraphStateBudget::unlimited());
-    let record = state.append_message("source", source_message.clone());
-    state.record_node_execution("source")?;
-    assert!(matches!(
-        edge.evaluate(&source_message, record.version, &state.view())?,
-        EdgeDecision::Activate { .. }
-    ));
-
-    let conditions = vec![
-        ActivationCondition::OnAnyMessage,
-        ActivationCondition::Always,
-        ActivationCondition::Never,
-        ActivationCondition::MessageRoleIs {
-            role: MessageRole::Assistant,
+    let instruction_query =
+        MessageQuery::where_eq("metadata.kind", "instruction").select(["content[*].text"]);
+    let observe = GraphNode::new(
+        "observe_screen",
+        NodeKind::Transform {
+            executor: "observe_screen".to_string(),
+            config: json!({"read_only": true}),
         },
-        ActivationCondition::MessageHasText,
-        ActivationCondition::MessageHasToolCall,
-        ActivationCondition::MessageHasToolResult { is_error: None },
-        ActivationCondition::SourceVersionAtLeast { version: 1 },
-        ActivationCondition::SourceMessageCountAtLeast { count: 1 },
-    ];
-    for condition in conditions {
-        let _ = condition.matches("source", &source_message, record.version, &state.view());
-    }
+        InputPackageSpec::new("task").required(
+            "instruction",
+            instruction_query.clone(),
+            Cardinality::Latest,
+        ),
+    )
+    .output("out")
+    .concurrency(NodeConcurrency::Parallel { max: 2 });
+    assert_eq!(observe.id(), "observe_screen");
+    assert!(matches!(
+        observe.concurrency,
+        NodeConcurrency::Parallel { max: 2 }
+    ));
+
+    let lookup = GraphNode::new(
+        "lookup_catalog",
+        NodeKind::Transform {
+            executor: "lookup_catalog".to_string(),
+            config: json!({"cacheable": true}),
+        },
+        InputPackageSpec::new("task").required(
+            "instruction",
+            instruction_query.clone(),
+            Cardinality::Latest,
+        ),
+    )
+    .output("out");
+    let final_node = GraphNode::final_node(
+        "final",
+        InputPackageSpec::new("decision")
+            .required(
+                "screen",
+                MessageQuery::where_eq("metadata.kind", "observe_screen"),
+                Cardinality::Latest,
+            )
+            .required(
+                "catalog",
+                MessageQuery::where_eq("metadata.kind", "lookup_catalog"),
+                Cardinality::Latest,
+            )
+            .optional(
+                "diagnostic",
+                MessageQuery::where_eq("role", "diagnostic"),
+                Cardinality::Latest,
+            ),
+    );
+
+    let edge = GraphEdge::new(
+        "observe_to_final",
+        ("observe_screen", "out"),
+        ("final", "decision"),
+    );
+    assert_eq!(edge.id(), "observe_to_final");
+    assert_eq!(edge.from(), &OutputRef::new("observe_screen", "out"));
+    assert_eq!(edge.to(), &PackageRef::new("final", "decision"));
 
     let graph = Graph::builder("graph_contract")
-        .node(source)
-        .node(GraphNode::new("target").with_action(GraphNodeAction::PassthroughInput))
-        .start_node("source")
-        .end_node("target")
-        .edge(edge)
-        .budget(GraphStateBudget {
-            max_total_node_executions: Some(10),
-            max_node_executions: Some(5),
-            max_no_progress_ticks: Some(2),
-        })
+        .node(observe)
+        .node(lookup)
+        .node(final_node)
+        .edge(
+            "input_to_observe",
+            ("input", "messages"),
+            ("observe_screen", "task"),
+        )
+        .edge(
+            "input_to_lookup",
+            ("input", "messages"),
+            ("lookup_catalog", "task"),
+        )
+        .edge(
+            "lookup_to_final",
+            ("lookup_catalog", "out"),
+            ("final", "decision"),
+        )
+        .edge(
+            "observe_to_final",
+            ("observe_screen", "out"),
+            ("final", "decision"),
+        )
+        .finish_at("final")
         .build()?;
     assert_eq!(graph.name(), "graph_contract");
-    assert!(graph.node("source").is_some());
-    assert_eq!(graph.nodes().len(), 2);
-    assert_eq!(graph.edges().len(), 1);
-    assert_eq!(graph.start_node_ids(), &["source".to_string()]);
-    assert!(graph.is_end_node("target"));
-    assert_eq!(graph.outgoing_edges("source").count(), 1);
+    assert!(graph.node("observe_screen").is_some());
+    assert_eq!(graph.nodes().len(), 3);
+    assert_eq!(graph.edges().len(), 4);
+    assert_eq!(graph.input(), &OutputRef::new("input", "messages"));
+    assert_eq!(graph.finish_node(), Some("final"));
 
     let run_id = Uuid::new_v4();
-    let result = GraphRunner::new().run(
+    let initial = RunMessage::user(vec![ContentBlock::text("compare screen and catalog")])?
+        .with_metadata("kind", json!("instruction"));
+    let result = GraphRunner::with_executor(Arc::new(ContractRuntimeExecutor)).run(
         &graph,
-        GraphRunInput {
-            run_id: Some(run_id),
-            initial_messages: vec![RunMessage::user(vec![ContentBlock::text("input")])?],
-            stop_requested: false,
-        },
+        GraphRunInput::new(vec![initial]).with_run_id(run_id),
     )?;
     assert_eq!(result.run_id, run_id);
     assert_eq!(result.status, GraphRunStatus::Completed);
     assert_eq!(GraphRunStatus::Completed.as_str(), "completed");
     assert!(result.error.is_none());
-    assert!(result.state.total_node_executions() >= 1);
+    assert_eq!(result.ledger.node_attempts.len(), 3);
+    assert_eq!(result.ledger.transfers.len(), 4);
+    let final_package = result
+        .state
+        .package_states
+        .get(&PackageRef::new("final", "decision"))
+        .unwrap();
+    assert!(final_package.items.contains_key("screen"));
+    assert!(final_package.items.contains_key("catalog"));
     assert!(!result.messages.is_empty());
     assert!(result
         .events
         .iter()
         .any(|event| matches!(event, CoreEvent::GraphStarted { .. })));
 
-    let mut direct_state = GraphState::new(Uuid::new_v4(), GraphStateBudget::default());
-    let fired = FiredEdgeRecord::new("e", "source", 1, "target");
-    assert!(direct_state.mark_edge_fired(fired.clone()));
-    assert!(direct_state.has_edge_fired(&fired));
-    assert_eq!(direct_state.fired_edges().len(), 1);
-    assert_eq!(direct_state.view().run_id(), direct_state.run_id());
-    direct_state.request_stop();
-    assert!(direct_state.is_stop_requested());
+    let loop_graph = Graph::builder("bounded_loop")
+        .node(
+            GraphNode::new(
+                "loop",
+                NodeKind::Transform {
+                    executor: "loop".to_string(),
+                    config: json!({}),
+                },
+                InputPackageSpec::new("input").required(
+                    "turn",
+                    MessageQuery::any(),
+                    Cardinality::Latest,
+                ),
+            )
+            .output("out"),
+        )
+        .edge("input_to_loop", ("input", "messages"), ("loop", "input"))
+        .edge("loop_to_loop", ("loop", "out"), ("loop", "input"))
+        .build()?;
+    let no_progress = GraphRunner::with_executor(Arc::new(ContractRuntimeExecutor)).run(
+        &loop_graph,
+        GraphRunInput::new(vec![RunMessage::user(vec![ContentBlock::text("loop")])?])
+            .with_max_ticks(2),
+    )?;
+    assert_eq!(no_progress.status, GraphRunStatus::BudgetExceeded);
+    assert!(no_progress
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("tick budget exceeded"));
 
     assert_eq!(default_react_graph()?.name(), "default_react");
     assert_eq!(
-        single_node_graph("single", "only")?.start_node_ids()[0],
-        "only"
+        single_node_graph("single", "only")?.finish_node(),
+        Some("only")
     );
+
+    let runtime_graph = graph_rt::GraphSpec::builder("runtime_contract")
+        .node(graph_rt::NodeSpec::final_node(
+            "target",
+            graph_rt::InputPackageSpec::new("input").required(
+                "turn",
+                graph_rt::MessageQuery::any(),
+                graph_rt::Cardinality::Latest,
+            ),
+        ))
+        .edge(
+            "input_to_target",
+            ("input", "messages"),
+            ("target", "input"),
+        )
+        .finish_at("target")
+        .build()?;
+    let runtime_output = block_on(
+        graph_rt::GraphRuntime::new(
+            runtime_graph,
+            graph_rt::GraphRuntimeServices::new(Arc::new(ContractRuntimeExecutor)),
+        )
+        .run(graph_rt::GraphRunInput::new(vec![RunMessage::user(vec![
+            ContentBlock::text("runtime input"),
+        ])?])),
+    )?;
+    assert_eq!(runtime_output.status, graph_rt::GraphRunStatus::Completed);
+    assert_eq!(runtime_output.ledger.transfers.len(), 1);
+    assert_eq!(runtime_output.ledger.node_attempts[0].node, "target");
+
+    let package_edge = GraphEdge::new("package_edge", ("agent", "tool_calls"), ("tool", "calls"));
+    assert_eq!(package_edge.from.node, "agent");
+    assert_eq!(package_edge.to.package, "calls");
     Ok(())
 }
 

@@ -1,16 +1,13 @@
 use agent_core::agent::AgentRunInput;
 use agent_core::agent_definition::AgentDefinitionBuilder;
-use agent_core::content_block::ContentBlock;
 use agent_core::event::CoreEvent;
 use agent_core::graph::Graph;
-use agent_core::graph_edge::{ActivationCondition, GraphEdge};
-use agent_core::graph_node::{GraphNode, GraphNodeAction};
+use agent_core::graph_node::{Cardinality, GraphNode, InputPackageSpec, MessageQuery};
 use agent_core::hook::{
     HookEventRequest, HookName, HookPayload, PointHookDecision, WrapperRequest, WrapperResponse,
     WrapperResult,
 };
 use agent_core::hook_handler::HandlerRegistry;
-use agent_core::run_message::RunMessage;
 use agent_core::tool::{Tool, ToolInvocation, ToolMetadata, ToolOutput};
 use agent_core::tool_executor::{ToolCall, ToolExecutor};
 use agent_core::tool_registry::ToolRegistry;
@@ -125,20 +122,17 @@ fn main() -> AgentCoreResult<()> {
         })?;
 
     let user_message = user_input::text_message("hello agent")?;
-    let done_message = RunMessage::assistant(vec![ContentBlock::text("done")])?;
     let graph = Graph::builder("public_api_smoke")
-        .node(GraphNode::new("input").with_action(GraphNodeAction::PassthroughInput))
-        .node(
-            GraphNode::new("done")
-                .with_action(GraphNodeAction::EmitMessages(vec![done_message]))
-                .terminal(true),
-        )
-        .start_node("input")
-        .end_node("done")
-        .edge(
-            GraphEdge::new("input_to_done", "input", "done")
-                .with_activation_condition(ActivationCondition::MessageHasText),
-        )
+        .node(GraphNode::final_node(
+            "done",
+            InputPackageSpec::new("input").required(
+                "turn",
+                MessageQuery::any(),
+                Cardinality::Latest,
+            ),
+        ))
+        .edge("input_to_done", ("input", "messages"), ("done", "input"))
+        .finish_at("done")
         .build()?;
 
     let result = agent
@@ -146,8 +140,16 @@ fn main() -> AgentCoreResult<()> {
 
     let cancel_agent = AgentFactory::default().create(definition)?;
     let cancel_graph = Graph::builder("cancelled_before_start")
-        .node(GraphNode::new("start").with_action(GraphNodeAction::PassthroughInput))
-        .start_node("start")
+        .node(GraphNode::final_node(
+            "start",
+            InputPackageSpec::new("input").required(
+                "turn",
+                MessageQuery::any(),
+                Cardinality::Latest,
+            ),
+        ))
+        .edge("input_to_start", ("input", "messages"), ("start", "input"))
+        .finish_at("start")
         .build()?;
     let cancelled = cancel_agent.run(AgentRunInput::new(cancel_graph).with_stop_requested(true))?;
 

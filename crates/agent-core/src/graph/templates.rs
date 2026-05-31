@@ -1,51 +1,61 @@
 use crate::error::AgentCoreResult;
 use crate::graph::Graph;
-use crate::graph_edge::{ActivationCondition, GraphEdge};
-use crate::graph_node::{GraphNode, GraphNodeAction};
+use crate::graph_node::{
+    Cardinality, GraphNode, InputPackageSpec, MessageQuery, NodeConcurrency, NodeKind,
+};
+use serde_json::json;
 
 pub const DEFAULT_REACT_GRAPH: &str = "default_react";
 
 pub fn default_react_graph() -> AgentCoreResult<Graph> {
     Graph::builder(DEFAULT_REACT_GRAPH)
-        .node(GraphNode::new("start").with_action(GraphNodeAction::PassthroughInput))
-        .node(GraphNode::new("build_context"))
-        .node(GraphNode::new("provider_request"))
-        .node(GraphNode::new("collect_assistant"))
-        .node(GraphNode::new("execute_tools"))
-        .node(GraphNode::new("finalize_turn").terminal(true))
-        .node(GraphNode::new("handle_error").terminal(true))
-        .start_node("start")
-        .end_node("finalize_turn")
-        .end_node("handle_error")
-        .edge(GraphEdge::new("start_to_context", "start", "build_context"))
-        .edge(GraphEdge::new(
-            "context_to_provider",
-            "build_context",
-            "provider_request",
-        ))
-        .edge(GraphEdge::new(
-            "provider_to_collect",
-            "provider_request",
-            "collect_assistant",
+        .node(
+            GraphNode::agent(
+                "agent",
+                "default_agent",
+                InputPackageSpec::new("context")
+                    .required("turn", MessageQuery::any(), Cardinality::Latest)
+                    .optional(
+                        "tool_result",
+                        MessageQuery::where_eq("content[*].type", "tool_result"),
+                        Cardinality::Latest,
+                    ),
+            )
+            .output("tool_calls")
+            .output("final")
+            .concurrency(NodeConcurrency::Serial),
+        )
+        .node(
+            GraphNode::tool(
+                "tool",
+                "dispatch_tool_call",
+                "tool_call",
+                "results",
+                InputPackageSpec::new("calls").required(
+                    "tool_call",
+                    MessageQuery::where_eq("content[*].type", "tool_call"),
+                    Cardinality::Latest,
+                ),
+            )
+            .concurrency(NodeConcurrency::Parallel { max: 4 }),
+        )
+        .node(GraphNode::final_node(
+            "final",
+            InputPackageSpec::new("answer").required(
+                "assistant_answer",
+                MessageQuery::where_exists("content[*].text"),
+                Cardinality::Latest,
+            ),
         ))
         .edge(
-            GraphEdge::new("collect_to_tools", "collect_assistant", "execute_tools")
-                .with_activation_condition(ActivationCondition::MessageHasToolCall),
+            "input_to_agent",
+            ("input", "messages"),
+            ("agent", "context"),
         )
-        .edge(
-            GraphEdge::new("collect_to_final", "collect_assistant", "finalize_turn")
-                .with_activation_condition(ActivationCondition::MessageHasText)
-                .with_priority(10),
-        )
-        .edge(GraphEdge::new(
-            "tools_to_context",
-            "execute_tools",
-            "build_context",
-        ))
-        .edge(
-            GraphEdge::new("provider_to_error", "provider_request", "handle_error")
-                .with_activation_condition(ActivationCondition::Never),
-        )
+        .edge("agent_to_tool", ("agent", "tool_calls"), ("tool", "calls"))
+        .edge("tool_to_agent", ("tool", "results"), ("agent", "context"))
+        .edge("agent_to_final", ("agent", "final"), ("final", "answer"))
+        .finish_at("final")
         .build()
 }
 
@@ -55,9 +65,24 @@ pub fn single_node_graph(
 ) -> AgentCoreResult<Graph> {
     let node_id = node_id.into();
     Graph::builder(name)
-        .node(GraphNode::new(node_id.clone()).terminal(true))
-        .start_node(node_id.clone())
-        .end_node(node_id)
+        .node(GraphNode::new(
+            node_id.clone(),
+            NodeKind::Transform {
+                executor: "single_node".to_string(),
+                config: json!({}),
+            },
+            InputPackageSpec::new("input").required(
+                "turn",
+                MessageQuery::any(),
+                Cardinality::Latest,
+            ),
+        ))
+        .edge(
+            "input_to_node",
+            ("input", "messages"),
+            (node_id.clone(), "input"),
+        )
+        .finish_at(node_id)
         .build()
 }
 
@@ -70,7 +95,8 @@ mod tests {
         let graph = default_react_graph().unwrap();
 
         assert_eq!(graph.name(), DEFAULT_REACT_GRAPH);
-        assert!(graph.node("start").is_some());
-        assert!(graph.node("finalize_turn").is_some());
+        assert!(graph.node("agent").is_some());
+        assert_eq!(graph.finish_node(), Some("final"));
+        assert_eq!(graph.edges().len(), 4);
     }
 }

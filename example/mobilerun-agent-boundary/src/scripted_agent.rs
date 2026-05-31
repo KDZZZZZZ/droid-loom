@@ -14,10 +14,12 @@ use agent_core::content_block::{ContentBlock, DiagnosticLevel};
 use agent_core::context::{ContextBuildInput, ContextBuilder};
 use agent_core::event::{CoreEvent, EventLog};
 use agent_core::graph::Graph;
-use agent_core::graph_edge::{ActivationCondition, GraphEdge};
-use agent_core::graph_node::{GraphNode, GraphNodeAction};
+use agent_core::graph_edge::PackageRef;
+use agent_core::graph_node::{
+    Cardinality, GraphNode, InputPackageSpec, MessageQuery, NodeConcurrency, NodeKind,
+};
 use agent_core::graph_runner::{GraphRunInput, GraphRunner};
-use agent_core::graph_state::GraphStateBudget;
+use agent_core::graph_runtime as rt;
 use agent_core::hook::{
     HookEventRequest, HookName, HookPayload, PointHookDecision, WrapperRequest, WrapperResponse,
     WrapperResult,
@@ -30,8 +32,10 @@ use agent_core::session_store::{InMemorySessionStore, SessionStore};
 use agent_core::tool_executor::{ToolCall, ToolExecutor};
 use agent_core::tool_registry::ToolRegistry;
 use agent_core::turn_loop::TurnLoop;
-use agent_core::{user_input, AgentCoreResult, AgentFactory};
+use agent_core::{user_input, AgentCoreResult, AgentFactory, AgentServices};
+use futures::future::BoxFuture;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -406,7 +410,7 @@ pub fn run_boundary_probe() -> AgentCoreResult<BoundaryReport> {
     Ok(BoundaryReport {
         checks,
         gaps: vec![
-            "GraphRunner can execute built-in graph nodes, but provider/tool node execution is still an external orchestration concern.",
+            "GraphRunner executes package graph nodes through an async NodeExecutor; this boundary example scripts provider/tool effects instead of calling real services.",
             "HandlerRegistry is callable through public API, but core runners do not automatically inject handlers into every hook point yet.",
             "Tool timeout metadata is declared, but this synchronous ToolExecutor does not enforce wall-clock deadlines.",
             "Structured output schema validation, credential vaults, and real mobile observation parsing remain outside core.",
@@ -454,6 +458,7 @@ fn run_app_map_probe() -> AgentCoreResult<String> {
     let mut maintenance_map = map.clone();
     let first_transition = maintenance_map.transitions().first().cloned();
     if let Some(transition) = first_transition {
+        let _ = maintenance_map.mark_page_stale(&transition.from_page);
         maintenance_map.mark_transition_failed(&transition.from_page, &transition.action.id);
         maintenance_map.mark_transition_failed(&transition.from_page, &transition.action.id);
         maintenance_map.mark_transition_failed(&transition.from_page, &transition.action.id);
@@ -682,54 +687,166 @@ struct GraphProbe {
     events: Vec<CoreEvent>,
 }
 
+#[derive(Debug, Clone)]
+struct ScriptedNodeExecutor {
+    outputs: Arc<BTreeMap<String, Vec<(String, RunMessage)>>>,
+}
+
+impl ScriptedNodeExecutor {
+    fn new(items: Vec<(&str, Vec<(&str, RunMessage)>)>) -> Self {
+        let mut outputs = BTreeMap::new();
+        for (node_id, node_outputs) in items {
+            outputs.insert(
+                node_id.to_string(),
+                node_outputs
+                    .into_iter()
+                    .map(|(port, message)| (port.to_string(), message))
+                    .collect(),
+            );
+        }
+        Self {
+            outputs: Arc::new(outputs),
+        }
+    }
+}
+
+impl rt::NodeExecutor for ScriptedNodeExecutor {
+    fn execute(
+        &self,
+        node: rt::NodeSpec,
+        _input: rt::NodeInput,
+        _ctx: rt::NodeExecutionContext,
+    ) -> BoxFuture<'static, AgentCoreResult<rt::NodeOutput>> {
+        let outputs = self.outputs.get(&node.id).cloned().unwrap_or_default();
+        Box::pin(async move {
+            if matches!(node.kind, rt::NodeKind::Final) {
+                return Ok(rt::NodeOutput::new());
+            }
+
+            let mut node_output = rt::NodeOutput::new();
+            for (port, message) in outputs {
+                node_output = node_output.with_message(port, message);
+            }
+            Ok(node_output)
+        })
+    }
+}
+
+fn scripted_graph_runner(items: Vec<(&str, Vec<(&str, RunMessage)>)>) -> GraphRunner {
+    GraphRunner::with_executor(Arc::new(ScriptedNodeExecutor::new(items)))
+}
+
 fn run_graph_probe(
     definition: &agent_core::AgentDefinition,
     user_message: RunMessage,
     assistant_message: RunMessage,
 ) -> AgentCoreResult<GraphProbe> {
-    let done_message = RunMessage::assistant(vec![ContentBlock::text("mobile task completed")])?;
+    let done_message = RunMessage::assistant(vec![ContentBlock::text("mobile task completed")])?
+        .with_metadata("kind", json!("final"));
     let graph = Graph::builder("mobilerun_fast_turn")
-        .node(GraphNode::new("input").with_action(GraphNodeAction::PassthroughInput))
         .node(
-            GraphNode::new("agent_turn")
-                .with_action(GraphNodeAction::EmitMessages(vec![assistant_message])),
+            GraphNode::agent(
+                "agent_turn",
+                "mobilerun_agent",
+                InputPackageSpec::new("context").required(
+                    "instruction",
+                    MessageQuery::any(),
+                    Cardinality::Latest,
+                ),
+            )
+            .output("tool_calls"),
         )
         .node(
-            GraphNode::new("done")
-                .with_action(GraphNodeAction::EmitMessages(vec![done_message]))
-                .terminal(true),
+            GraphNode::new(
+                "mark_done",
+                NodeKind::Transform {
+                    executor: "mark_done".to_string(),
+                    config: json!({}),
+                },
+                InputPackageSpec::new("calls").required(
+                    "tool_call",
+                    MessageQuery::where_eq("content[*].type", "tool_call"),
+                    Cardinality::Latest,
+                ),
+            )
+            .output("final"),
         )
-        .start_node("input")
-        .end_node("done")
+        .node(GraphNode::final_node(
+            "done",
+            InputPackageSpec::new("answer").required(
+                "answer",
+                MessageQuery::where_eq("metadata.kind", "final"),
+                Cardinality::Latest,
+            ),
+        ))
         .edge(
-            GraphEdge::new("input_to_agent", "input", "agent_turn")
-                .with_activation_condition(ActivationCondition::MessageHasText),
+            "input_to_agent",
+            ("input", "messages"),
+            ("agent_turn", "context"),
         )
         .edge(
-            GraphEdge::new("agent_to_done", "agent_turn", "done")
-                .with_activation_condition(ActivationCondition::MessageHasToolCall),
+            "agent_to_done",
+            ("agent_turn", "tool_calls"),
+            ("mark_done", "calls"),
         )
+        .edge("done_to_final", ("mark_done", "final"), ("done", "answer"))
+        .finish_at("done")
         .build()?;
 
-    let agent = AgentFactory::default().create(definition.clone())?;
+    let services = AgentServices {
+        graph_runner: scripted_graph_runner(vec![
+            ("agent_turn", vec![("tool_calls", assistant_message)]),
+            ("mark_done", vec![("final", done_message)]),
+        ]),
+    };
+    let agent = AgentFactory::new(services).create(definition.clone())?;
     let run = agent.run(AgentRunInput::new(graph).with_initial_messages(vec![user_message]))?;
 
     let cancel_graph = Graph::builder("cancel_before_start")
-        .node(GraphNode::new("start").with_action(GraphNodeAction::PassthroughInput))
-        .start_node("start")
+        .node(GraphNode::final_node(
+            "final",
+            InputPackageSpec::new("input").required(
+                "turn",
+                MessageQuery::any(),
+                Cardinality::Latest,
+            ),
+        ))
+        .edge("input_to_final", ("input", "messages"), ("final", "input"))
+        .finish_at("final")
         .build()?;
     let cancelled = agent.run(AgentRunInput::new(cancel_graph).with_stop_requested(true))?;
 
     let budget_graph = Graph::builder("budget_guard")
-        .node(GraphNode::new("start"))
-        .start_node("start")
-        .budget(GraphStateBudget {
-            max_total_node_executions: Some(0),
-            max_node_executions: Some(1),
-            max_no_progress_ticks: None,
-        })
+        .node(
+            GraphNode::new(
+                "loop",
+                NodeKind::Transform {
+                    executor: "loop".to_string(),
+                    config: json!({}),
+                },
+                InputPackageSpec::new("input").required(
+                    "turn",
+                    MessageQuery::any(),
+                    Cardinality::Latest,
+                ),
+            )
+            .output("out"),
+        )
+        .edge("input_to_loop", ("input", "messages"), ("loop", "input"))
+        .edge("loop_to_loop", ("loop", "out"), ("loop", "input"))
         .build()?;
-    let budgeted = GraphRunner::new().run(&budget_graph, GraphRunInput::default())?;
+    let budgeted = scripted_graph_runner(vec![(
+        "loop",
+        vec![(
+            "out",
+            RunMessage::assistant(vec![ContentBlock::text("loop")])?,
+        )],
+    )])
+    .run(
+        &budget_graph,
+        GraphRunInput::new(vec![RunMessage::user(vec![ContentBlock::text("budget")])?])
+            .with_max_ticks(2),
+    )?;
 
     let detail = format!(
         "status={}, messages={}, events={}, first_event={}, cancel={}, budget_guard={}",
@@ -769,37 +886,91 @@ fn run_reasoning_graph_probe(definition: &agent_core::AgentDefinition) -> AgentC
     ])?;
     let manager_check = RunMessage::assistant(vec![ContentBlock::text(
         "Manager verified the executor result and can finalize.",
-    )])?;
+    )])?
+    .with_metadata("kind", json!("manager_check"));
 
     let graph = Graph::builder("mobilerun_reasoning_manager_executor")
         .node(
-            GraphNode::new("manager_plan")
-                .with_action(GraphNodeAction::EmitMessages(vec![manager_plan])),
+            GraphNode::agent(
+                "manager_plan",
+                "manager",
+                InputPackageSpec::new("turn").required(
+                    "instruction",
+                    MessageQuery::any(),
+                    Cardinality::Latest,
+                ),
+            )
+            .output("subgoal"),
         )
         .node(
-            GraphNode::new("executor_action")
-                .with_action(GraphNodeAction::EmitMessages(vec![executor_action])),
+            GraphNode::agent(
+                "executor_action",
+                "executor",
+                InputPackageSpec::new("subgoal").required(
+                    "instruction",
+                    MessageQuery::where_exists("content[*].text"),
+                    Cardinality::Latest,
+                ),
+            )
+            .output("tool_calls"),
         )
         .node(
-            GraphNode::new("manager_check")
-                .with_action(GraphNodeAction::EmitMessages(vec![manager_check]))
-                .terminal(true),
+            GraphNode::agent(
+                "manager_check",
+                "manager",
+                InputPackageSpec::new("evidence").required(
+                    "tool_call",
+                    MessageQuery::where_eq("content[*].type", "tool_call"),
+                    Cardinality::AtLeast(1),
+                ),
+            )
+            .output("final"),
         )
-        .start_node("manager_plan")
-        .end_node("manager_check")
+        .node(GraphNode::final_node(
+            "final",
+            InputPackageSpec::new("answer").required(
+                "manager_answer",
+                MessageQuery::where_eq("metadata.kind", "manager_check"),
+                Cardinality::Latest,
+            ),
+        ))
         .edge(
-            GraphEdge::new("manager_to_executor", "manager_plan", "executor_action")
-                .with_activation_condition(ActivationCondition::MessageHasText),
+            "input_to_manager",
+            ("input", "messages"),
+            ("manager_plan", "turn"),
         )
         .edge(
-            GraphEdge::new("executor_to_manager", "executor_action", "manager_check")
-                .with_activation_condition(ActivationCondition::MessageHasToolCall),
+            "manager_to_executor",
+            ("manager_plan", "subgoal"),
+            ("executor_action", "subgoal"),
         )
+        .edge(
+            "executor_to_manager",
+            ("executor_action", "tool_calls"),
+            ("manager_check", "evidence"),
+        )
+        .edge(
+            "manager_to_final",
+            ("manager_check", "final"),
+            ("final", "answer"),
+        )
+        .finish_at("final")
         .build()?;
 
-    let run = AgentFactory::default()
+    let services = AgentServices {
+        graph_runner: scripted_graph_runner(vec![
+            ("manager_plan", vec![("subgoal", manager_plan)]),
+            ("executor_action", vec![("tool_calls", executor_action)]),
+            ("manager_check", vec![("final", manager_check)]),
+        ]),
+    };
+    let run = AgentFactory::new(services)
         .create(definition.clone())?
-        .run(AgentRunInput::new(graph))?;
+        .run(
+            AgentRunInput::new(graph).with_initial_messages(vec![RunMessage::user(vec![
+                ContentBlock::text("search wireless charger"),
+            ])?]),
+        )?;
 
     Ok(format!(
         "status={}, messages={}, manager_executor_edges={}",
@@ -815,77 +986,150 @@ fn run_reasoning_graph_probe(definition: &agent_core::AgentDefinition) -> AgentC
 fn run_complex_graph_probe(_definition: &agent_core::AgentDefinition) -> AgentCoreResult<String> {
     let task_package = RunMessage::user(vec![ContentBlock::text(
         "Task package: search Demo Shop for wireless charger.",
-    )])?;
+    )])?
+    .with_metadata("kind", json!("task"));
     let dependency_context = RunMessage::user(vec![ContentBlock::text(
         "Dependency result: app_open=true; screen=home.",
-    )])?;
-    let observe_screen = RunMessage::assistant(vec![ContentBlock::tool_call(
+    )])?
+    .with_metadata("kind", json!("dependency"));
+    let observe_screen = RunMessage::tool(vec![ContentBlock::tool_result(
         "complex-ui",
-        "ui_state",
-        json!({}),
+        Some("ui_state".to_string()),
+        json!({"screen": "demo_shop_home", "search_box": true}),
+        false,
     )])?;
-    let lookup_catalog = RunMessage::assistant(vec![ContentBlock::tool_call(
+    let lookup_catalog = RunMessage::tool(vec![ContentBlock::tool_result(
         "complex-search",
-        "search_database",
-        json!({"query": "wireless charger"}),
+        Some("search_database".to_string()),
+        json!({"query": "wireless charger", "top_result": "15W Stand"}),
+        false,
     )])?;
     let summarize = RunMessage::assistant(vec![ContentBlock::text(
-        "Branch output available for manager reconciliation.",
-    )])?;
+        "Screen is ready and catalog has 15W Stand; next phone action is type query and open first result.",
+    )])?
+    .with_metadata("kind", json!("summary"));
 
     let graph = Graph::builder("mobilerun_complex_task_dag")
         .node(
-            GraphNode::new("task_package")
-                .with_action(GraphNodeAction::EmitMessages(vec![task_package])),
-        )
-        .node(
-            GraphNode::new("dependency_context")
-                .with_action(GraphNodeAction::EmitMessages(vec![dependency_context])),
-        )
-        .node(
-            GraphNode::new("observe_screen")
-                .with_action(GraphNodeAction::EmitMessages(vec![observe_screen])),
-        )
-        .node(
-            GraphNode::new("lookup_catalog")
-                .with_action(GraphNodeAction::EmitMessages(vec![lookup_catalog])),
-        )
-        .node(
-            GraphNode::new("summarize_branch")
-                .with_action(GraphNodeAction::EmitMessages(vec![summarize])),
-        )
-        .start_node("task_package")
-        .start_node("dependency_context")
-        .edge(
-            GraphEdge::new("task_to_observe", "task_package", "observe_screen")
-                .with_activation_condition(ActivationCondition::MessageHasText),
-        )
-        .edge(
-            GraphEdge::new(
-                "dependency_to_lookup",
-                "dependency_context",
-                "lookup_catalog",
+            GraphNode::tool(
+                "observe_screen",
+                "ui_state",
+                "task",
+                "results",
+                InputPackageSpec::new("observe_input")
+                    .required(
+                        "task",
+                        MessageQuery::where_eq("metadata.kind", "task"),
+                        Cardinality::Latest,
+                    )
+                    .required(
+                        "dependency",
+                        MessageQuery::where_eq("metadata.kind", "dependency"),
+                        Cardinality::Latest,
+                    ),
             )
-            .with_activation_condition(ActivationCondition::MessageHasText),
+            .concurrency(NodeConcurrency::Parallel { max: 2 }),
+        )
+        .node(
+            GraphNode::tool(
+                "lookup_catalog",
+                "search_database",
+                "task",
+                "results",
+                InputPackageSpec::new("lookup_input").required(
+                    "task",
+                    MessageQuery::where_eq("metadata.kind", "task"),
+                    Cardinality::Latest,
+                ),
+            )
+            .concurrency(NodeConcurrency::Parallel { max: 2 }),
+        )
+        .node(
+            GraphNode::agent(
+                "summarize_branch",
+                "manager",
+                InputPackageSpec::new("evidence")
+                    .required(
+                        "screen",
+                        MessageQuery::where_eq("content[*].tool_name", "ui_state"),
+                        Cardinality::Latest,
+                    )
+                    .required(
+                        "catalog",
+                        MessageQuery::where_eq("content[*].tool_name", "search_database"),
+                        Cardinality::Latest,
+                    )
+                    .optional(
+                        "task",
+                        MessageQuery::where_eq("metadata.kind", "task"),
+                        Cardinality::Latest,
+                    ),
+            )
+            .output("summary"),
+        )
+        .node(GraphNode::final_node(
+            "final",
+            InputPackageSpec::new("answer").required(
+                "summary",
+                MessageQuery::where_eq("metadata.kind", "summary"),
+                Cardinality::Latest,
+            ),
+        ))
+        .edge(
+            "input_to_observe",
+            ("input", "messages"),
+            ("observe_screen", "observe_input"),
         )
         .edge(
-            GraphEdge::new("observe_to_summary", "observe_screen", "summarize_branch")
-                .with_activation_condition(ActivationCondition::MessageHasToolCall),
+            "input_to_lookup",
+            ("input", "messages"),
+            ("lookup_catalog", "lookup_input"),
         )
         .edge(
-            GraphEdge::new("lookup_to_summary", "lookup_catalog", "summarize_branch")
-                .with_activation_condition(ActivationCondition::MessageHasToolCall),
+            "task_to_summary",
+            ("input", "messages"),
+            ("summarize_branch", "evidence"),
         )
+        .edge(
+            "observe_to_summary",
+            ("observe_screen", "results"),
+            ("summarize_branch", "evidence"),
+        )
+        .edge(
+            "lookup_to_summary",
+            ("lookup_catalog", "results"),
+            ("summarize_branch", "evidence"),
+        )
+        .edge(
+            "summary_to_final",
+            ("summarize_branch", "summary"),
+            ("final", "answer"),
+        )
+        .finish_at("final")
         .build()?;
 
-    let run = GraphRunner::new().run(&graph, GraphRunInput::default())?;
+    let run = scripted_graph_runner(vec![
+        ("observe_screen", vec![("results", observe_screen)]),
+        ("lookup_catalog", vec![("results", lookup_catalog)]),
+        ("summarize_branch", vec![("summary", summarize)]),
+    ])
+    .run(
+        &graph,
+        GraphRunInput::new(vec![task_package, dependency_context]),
+    )?;
+    let summary_package_items = run
+        .state
+        .package_states
+        .get(&PackageRef::new("summarize_branch", "evidence"))
+        .map(|package| package.items.len())
+        .unwrap_or_default();
 
     Ok(format!(
-        "status={}, start_nodes=2, total_node_executions={}, fired_edges={}, summarize_runs={}",
+        "status={}, node_attempts={}, transfers={}, summary_package_items={}",
         run.status.as_str(),
-        run.state.total_node_executions(),
-        run.state.fired_edges().len(),
-        run.state.node_execution_count("summarize_branch")
+        run.ledger.node_attempts.len(),
+        run.ledger.transfers.len(),
+        summary_package_items
     ))
 }
 

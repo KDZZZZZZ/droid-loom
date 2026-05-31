@@ -31,6 +31,8 @@ Rust agent core。当前设计重点是把四个容易混在一起的层级拆�
 10. 落地顺序读 [10-roadmap](../10-roadmap/README.md)。
 11. 外部调用 core 的 API 契约读 [11-public-api](../11-public-api/README.md)。
 12. Droid Loom backend 分支和 Android shell 集成读 [13-droid-loom-backend](../13-droid-loom-backend/README.md)。
+13. core 内部 async runtime 优化读 [19-async-agent-core-optimization](../19-async-agent-core-optimization/README.md)。
+14. graph runtime 重新实现读 [20-graph-runtime-refactor](../20-graph-runtime-refactor/README.md)。
 
 这组文档是架构设计，不提供具体代码。
 
@@ -126,7 +128,7 @@ semantic entries。provider context 从 active leaf replay snapshot 和本轮 gr
 
 第一版 tool 只做 core 抽象，不做具体工具实现。具体 coding tools 后续作为 tool pack 接入。
 
-外部应用只依赖 public API。graph node、edge、GraphState、session JSONL 都不是第一版稳定 API。
+外部应用只依赖 public API。graph runtime state 和 session JSONL 不是第一版稳定可变写入 API。
 
 ## 参考来源
 

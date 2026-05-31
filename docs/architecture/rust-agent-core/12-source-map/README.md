@@ -299,21 +299,21 @@
 
 ### `src/graph/node.rs`
 
-职责：定义 node 契约和内置 node action。
+职责：定义 node 契约和 runtime node spec。
 
-内部逻辑：内置 action 包括 noop、passthrough input、emit messages、agent declaration、custom declaration；node 执行时可实时 emit message。
+内部逻辑：node kind 包括 transform、tool、agent、graph 和 final；node 执行由 `NodeExecutor` 完成，输出写入明确 output port。
 
-交互：`GraphRunner` 调用 node 并消费 emit；`GraphNodeAction::Agent` 是后续 child agent executor 的声明，不由 edge 执行。
+交互：`GraphRunner` 调用 async runtime，runtime 通过 `NodeExecutor` 执行 node 并消费 `NodeOutput`；`NodeKind::Agent` 是 child agent executor 的声明，不由 edge 执行。
 
 使用者：graph builder、graph runner、未来外部 node executor。
 
 ### `src/graph/edge.rs`
 
-职责：定义 edge 激活逻辑。
+职责：定义 edge 内容传输逻辑。
 
-内部逻辑：edge 读取 source message、source message version、只读 graph state view，返回 `Sleep` 或 `Activate`；第一版只保留 `Full` inheritance。
+内部逻辑：edge 从 `(source_node, output_port)` 读取未传输的 output log entries，按目标 input package 的 `MessageQuery` 过滤和投影，再写入目标 package。
 
-交互：由 `GraphRunner` 在 message 实时产生后立即调用；不执行 provider/tool/session，不管理循环数。
+交互：由 runtime 在扫描 edge 时调用；不执行 provider/tool/session，不管理循环数。
 
 使用者：graph builder、graph runner、测试。
 

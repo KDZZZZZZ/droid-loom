@@ -6,7 +6,7 @@
 
 本文只描述 graph run 内 message 和 content block 的定义、包装与构造规则。
 
-本文不描述 node 调度、edge 判定、event stream、GraphState 写入、session 持久化、replay 或 compact。
+本文不描述 node 调度、edge/package 传输、event stream、graph runtime state 写入、session 持久化、replay 或 compact。
 finalized message 如何提交成 session entry，放在
 [06-session](../06-session/README.md)。
 

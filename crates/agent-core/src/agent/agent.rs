@@ -61,19 +61,17 @@ impl Agent {
             graph_name: graph_name.clone(),
         }];
 
-        let graph_result = self.services.graph_runner.run(
-            &input.graph,
-            GraphRunInput {
-                run_id: input.run_id,
-                initial_messages: input.initial_messages,
-                stop_requested,
-            },
-        )?;
+        let mut graph_input =
+            GraphRunInput::new(input.initial_messages).with_stop_requested(stop_requested);
+        if let Some(run_id) = input.run_id {
+            graph_input = graph_input.with_run_id(run_id);
+        }
+        let graph_result = self.services.graph_runner.run(&input.graph, graph_input)?;
 
         events.extend(graph_result.events.clone());
 
         let status = match graph_result.status {
-            GraphRunStatus::Completed => AgentRunStatus::Completed,
+            GraphRunStatus::Completed | GraphRunStatus::Drained => AgentRunStatus::Completed,
             GraphRunStatus::Cancelled => AgentRunStatus::Cancelled,
             GraphRunStatus::BudgetExceeded | GraphRunStatus::Failed => AgentRunStatus::Failed,
         };
@@ -171,7 +169,7 @@ mod tests {
     use crate::agent_definition::AgentDefinitionBuilder;
     use crate::content_block::ContentBlock;
     use crate::graph::Graph;
-    use crate::graph_node::{GraphNode, GraphNodeAction};
+    use crate::graph_node::{Cardinality, GraphNode, InputPackageSpec, MessageQuery};
 
     fn test_agent() -> Agent {
         let definition = AgentDefinitionBuilder::new()
@@ -196,8 +194,16 @@ mod tests {
     fn run_delegates_to_graph_runner() {
         let agent = test_agent();
         let graph = Graph::builder("test")
-            .node(GraphNode::new("start").with_action(GraphNodeAction::PassthroughInput))
-            .start_node("start")
+            .node(GraphNode::final_node(
+                "final",
+                InputPackageSpec::new("input").required(
+                    "turn",
+                    MessageQuery::any(),
+                    Cardinality::Latest,
+                ),
+            ))
+            .edge("input_to_final", ("input", "messages"), ("final", "input"))
+            .finish_at("final")
             .build()
             .unwrap();
         let message = RunMessage::user(vec![ContentBlock::text("hello")]).unwrap();

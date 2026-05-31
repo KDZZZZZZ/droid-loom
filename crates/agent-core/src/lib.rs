@@ -22,8 +22,8 @@ pub mod graph_edge;
 pub mod graph_node;
 #[path = "graph/runner.rs"]
 pub mod graph_runner;
-#[path = "graph/state.rs"]
-pub mod graph_state;
+#[path = "graph/runtime.rs"]
+pub mod graph_runtime;
 #[path = "graph/templates.rs"]
 pub mod graph_templates;
 #[path = "hook/hook.rs"]

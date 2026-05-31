@@ -14,7 +14,7 @@
 - 输入用户信息
 - 终止 agent graph
 
-外部调用方包括 CLI、TUI、HTTP server、测试 harness、tool pack、plugin adapter 和后续多 agent 编排层。外部代码不直接写 `GraphState`、不直接改 session tree 内部结构、不绕过 registry 调用 tool。
+外部调用方包括 CLI、TUI、HTTP server、测试 harness、tool pack、plugin adapter 和后续多 agent 编排层。外部代码不直接改 graph runtime state、不直接改 session tree 内部结构、不绕过 registry 调用 tool。
 
 已经跑通的真实 ReAct 最小路径只展示 Android 百步级 phone-using 任务。该任务通过 `agent-smoke` 触发真实 provider，在模拟器中运行单次 ReAct graph loop：
 
@@ -85,10 +85,10 @@ definition.validate()?;
 
 #### `ToolVisibility`
 
-设置工具曝光层级。
+设置工具曝光层级。它本身只是 agent definition 上的配置值，生效点在 `ToolRegistry` 和 `ContextBuildInput`。
 
 ```rust
-use agent_core::ToolVisibility;
+use agent_core::agent_definition::ToolVisibility;
 
 let direct = ToolVisibility::Direct;
 let searchable = ToolVisibility::Searchable;
@@ -248,9 +248,10 @@ use agent_core::tool_registry::ToolRegistry;
 
 let mut registry = ToolRegistry::new();
 registry.register(ui_state_tool)?;
-let direct = registry.direct_schemas(&definition);
+let direct_tools = registry.direct_schemas(&definition);
 let searched = registry.search(&definition, "map", 5);
 let visible_tool = registry.get_for_agent(&definition, "android_ui_state")?;
+let hidden_blocked = registry.get_for_agent(&definition, "raw_adb_shell").is_err();
 ```
 
 #### `ToolExecutor`
@@ -315,98 +316,262 @@ match result.status {
 
 ### 构建 Graph
 
-调用方：默认 ReAct graph provider、多 agent 编排器、测试 harness、后续高级用户。
+调用方：默认 ReAct graph provider、多 agent 编排器、复杂 phone-using harness、graph 调度测试。
 
 #### `Graph`
 
-构造一次 agent run 的编排模板。
+`Graph` 是内容包 graph。初始输入固定写到 `("input", "messages")` output log；下游 node 通过 edge 把某个 output port 接到某个 input package。node 不再声明 `start_node`，只要它的 required package items 满足，就可以解锁运行。
 
 ```rust
 use agent_core::graph::Graph;
+use agent_core::graph_node::{Cardinality, GraphNode, InputPackageSpec, MessageQuery};
 
-let graph = Graph::builder("react_graph")
-    .node(input_node)
-    .node(react_node)
-    .start_node("input")
-    .edge(input_to_react)
+let graph = Graph::builder("phone_react")
+    .node(GraphNode::agent(
+        "agent",
+        "phone_agent",
+        InputPackageSpec::new("context")
+            .required("turn", MessageQuery::any(), Cardinality::Latest)
+            .optional(
+                "tool_result",
+                MessageQuery::where_eq("content[*].type", "tool_result"),
+                Cardinality::Latest,
+            ),
+    ).output("tool_calls").output("final"))
+    .node(GraphNode::tool(
+        "tap_tool",
+        "tap",
+        "tool_call",
+        "results",
+        InputPackageSpec::new("calls").required(
+            "tool_call",
+            MessageQuery::where_eq("content[*].type", "tool_call"),
+            Cardinality::Latest,
+        ),
+    ))
+    .node(GraphNode::final_node(
+        "final",
+        InputPackageSpec::new("answer").required(
+            "final_answer",
+            MessageQuery::where_exists("content[*].text"),
+            Cardinality::Latest,
+        ),
+    ))
+    .edge("input_to_agent", ("input", "messages"), ("agent", "context"))
+    .edge("agent_to_tool", ("agent", "tool_calls"), ("tap_tool", "calls"))
+    .edge("tool_to_agent", ("tap_tool", "results"), ("agent", "context"))
+    .edge("agent_to_final", ("agent", "final"), ("final", "answer"))
+    .finish_at("final")
     .build()?;
 ```
 
 #### `GraphNode`
 
-定义 graph 节点。
+定义一等 node。`GraphNode` 是 `NodeSpec` 的公开别名，支持普通 transform、tool node、agent node、subgraph node 和 final node。
 
 ```rust
-use agent_core::graph_node::{GraphNode, GraphNodeAction};
+use agent_core::graph_node::{GraphNode, InputPackageSpec, NodeKind};
+use serde_json::json;
 
-let node = GraphNode::new("input")
-    .with_label("User input")
-    .with_action(GraphNodeAction::PassthroughInput);
-```
+let transform = GraphNode::new(
+    "observe_screen",
+    NodeKind::Transform {
+        executor: "observe_screen".to_string(),
+        config: json!({"read_only": true}),
+    },
+    InputPackageSpec::new("context"),
+).output("observation");
 
-#### `GraphNodeAction`
+let agent = GraphNode::agent("manager", "phone_manager", InputPackageSpec::new("task"))
+    .output("tool_calls")
+    .output("final");
 
-设置节点行为。
-
-```rust
-use agent_core::graph_node::GraphNodeAction;
-
-let noop = GraphNodeAction::Noop;
-let passthrough = GraphNodeAction::PassthroughInput;
-let emit = GraphNodeAction::EmitMessages(vec![assistant_message]);
-let external_agent = GraphNodeAction::Agent {
-    agent_name: "executor".to_string(),
-};
+let final_node = GraphNode::final_node("final", InputPackageSpec::new("answer"));
 ```
 
 #### `GraphEdge`
 
-连接 source node 和 target node。
+edge 只做内容传输：从 `(source_node, output_port)` 读取 output log，写入 `(target_node, input_package)`。分流靠 output port，解锁靠目标 package 的 required/optional item。
 
 ```rust
-use agent_core::graph_edge::{ActivationCondition, GraphEdge};
+use agent_core::graph_edge::GraphEdge;
 
-let edge = GraphEdge::new("input_to_react", "input", "react_loop")
-    .with_activation_condition(ActivationCondition::MessageHasText)
-    .with_priority(10);
+let edge = GraphEdge::new(
+    "agent_tool_calls_to_tap",
+    ("agent", "tool_calls"),
+    ("tap_tool", "calls"),
+);
+
+assert_eq!(edge.from().port, "tool_calls");
+assert_eq!(edge.to().package, "calls");
 ```
 
-#### `ActivationCondition`
+#### `InputPackageSpec`
 
-控制 edge 何时激活。
+声明下游 node 需要的内容包。required items 全满足才解锁；optional items 会随包一起传入，但不阻塞解锁。
 
 ```rust
-use agent_core::graph_edge::ActivationCondition;
+use agent_core::graph_node::{Cardinality, InputPackageSpec, MessageQuery};
 
-let on_text = ActivationCondition::MessageHasText;
-let on_tool_call = ActivationCondition::MessageHasToolCall;
-let after_two_messages = ActivationCondition::SourceMessageCountAtLeast { count: 2 };
+let package = InputPackageSpec::new("context")
+    .required("turn", MessageQuery::any(), Cardinality::Latest)
+    .optional(
+        "tool_result",
+        MessageQuery::where_eq("content[*].type", "tool_result"),
+        Cardinality::Latest,
+    );
 ```
 
-#### `ContextInheritPolicy`
+#### `MessageQuery`
 
-设置 edge 激活后的上下文继承策略。
+筛选 message 及其字段。被 query 筛掉的 message 不进入 package，也不算新内容；选择字段的 hash 不变时，不会重复推进 package version。
 
 ```rust
-use agent_core::graph_edge::{ContextInheritPolicy, GraphEdge};
+use agent_core::graph_node::{FieldOp, MessageQuery};
+use serde_json::json;
 
-let edge = GraphEdge::new("a_to_b", "a", "b")
-    .with_inherit_policy(ContextInheritPolicy::Full);
+let tool_call = MessageQuery::where_eq("content[*].type", "tool_call")
+    .select([
+        "id",
+        "content[*].call_id",
+        "content[*].tool_name",
+        "content[*].arguments",
+    ]);
+
+let important = MessageQuery::any()
+    .filter("metadata.kind", FieldOp::In(vec![json!("task"), json!("dependency")]));
 ```
 
-#### `GraphStateBudget`
+#### `NodeOutput`
 
-设置 graph 执行预算。
+node executor 用 output port 分流。多个 edge 可以从同一个 port fan-out；不同语义的输出应优先写到不同 port。
 
 ```rust
-use agent_core::graph_state::GraphStateBudget;
+use agent_core::graph_node::NodeOutput;
 
-let budget = GraphStateBudget {
-    max_total_node_executions: Some(128),
-    max_node_executions: Some(128),
-    max_no_progress_ticks: None,
-};
-let graph = Graph::builder("bounded_react").node(start).start_node("start").budget(budget).build()?;
+let output = NodeOutput::new()
+    .with_message("tool_calls", assistant_tool_call_message)
+    .with_message("final", assistant_final_message);
+```
+
+#### `NodeConcurrency`
+
+控制同一个 node 的 activation 并发。`Serial` 保证同一 node 一次只跑一个 activation；`Parallel` 允许多个 activation 同时跑；`ByKey` 按某个 package item 的 selected hash 分组限流。
+
+```rust
+use agent_core::graph_node::{ConcurrencyKey, GraphNode, NodeConcurrency};
+
+let node = GraphNode::tool("lookup_catalog", "search_database", "task", "results", package)
+    .concurrency(NodeConcurrency::ByKey {
+        key: ConcurrencyKey::package_item("task"),
+        max_per_key: 1,
+    });
+```
+
+#### `GraphRunner`
+
+同步门面，内部执行 async graph runtime。默认 executor 只处理 final/empty transform；agent/tool/subgraph node 需要传入自定义 `NodeExecutor`。
+
+```rust
+use std::sync::Arc;
+use agent_core::graph_runner::{GraphRunInput, GraphRunner};
+
+let runner = GraphRunner::with_executor(Arc::new(RuntimeExecutor));
+let run = runner.run(
+    &graph,
+    GraphRunInput::new(vec![user_message]).with_max_ticks(10_000),
+)?;
+
+assert_eq!(run.status.as_str(), "completed");
+let transfers = run.ledger.transfers;
+let state = run.state;
+```
+
+#### `GraphRunInput`
+
+直接运行 graph 时传入初始消息、可选 run id、停止标记和 tick 预算。
+
+```rust
+use agent_core::graph_runner::GraphRunInput;
+use uuid::Uuid;
+
+let input = GraphRunInput::new(vec![user_message])
+    .with_run_id(Uuid::new_v4())
+    .with_stop_requested(false)
+    .with_max_ticks(1_000);
+```
+
+#### `GraphRunResult`
+
+读取 graph runner 的输出、runtime state 和 ledger。`state` 记录 output logs、edge 游标和 package 状态；`ledger` 记录 edge transfer 和 node attempt。
+
+```rust
+let run = runner.run(&graph, input)?;
+let status = run.status;
+let messages = run.messages;
+let package_states = run.state.package_states;
+let transfers = run.ledger.transfers;
+```
+
+#### `GraphRunStatus`
+
+匹配 graph run 状态。
+
+```rust
+use agent_core::graph_runner::GraphRunStatus;
+
+match run.status {
+    GraphRunStatus::Completed | GraphRunStatus::Drained => {}
+    GraphRunStatus::Cancelled => {}
+    GraphRunStatus::BudgetExceeded | GraphRunStatus::Failed => {}
+}
+```
+
+#### `NodeExecutor`
+
+执行一等 node。tool node、agent node、subgraph node、final node 都通过同一个 async executor 接口调度。
+
+```rust
+use agent_core::{AgentCoreResult, graph_runtime as rt};
+use futures::future::BoxFuture;
+
+struct RuntimeExecutor;
+
+impl rt::NodeExecutor for RuntimeExecutor {
+    fn execute(
+        &self,
+        node: rt::NodeSpec,
+        input: rt::NodeInput,
+        ctx: rt::NodeExecutionContext,
+    ) -> BoxFuture<'static, AgentCoreResult<rt::NodeOutput>> {
+        Box::pin(async move {
+            match node.kind {
+                rt::NodeKind::Agent(agent) => run_agent_node(agent, input, ctx).await,
+                rt::NodeKind::Tool(tool) => run_tool_node(tool, input, ctx).await,
+                rt::NodeKind::Final => Ok(rt::NodeOutput::new()),
+                _ => Ok(rt::NodeOutput::new()),
+            }
+        })
+    }
+}
+```
+
+#### `GraphRuntime`
+
+原生 async runtime。需要异步环境时直接用它；需要同步调用时用 `GraphRunner`。
+
+```rust
+use std::sync::Arc;
+use agent_core::graph_runtime as rt;
+
+let services = rt::GraphRuntimeServices::new(Arc::new(RuntimeExecutor));
+let output = rt::GraphRuntime::new(graph, services)
+    .run(rt::GraphRunInput::new(vec![user_message]).with_max_ticks(10_000))
+    .await?;
+
+assert_eq!(output.status, rt::GraphRunStatus::Completed);
+let transfers = output.ledger.transfers;
+let attempts = output.ledger.node_attempts;
 ```
 
 #### `AgentRunInput`
@@ -420,61 +585,6 @@ let input = AgentRunInput::new(graph)
     .with_initial_messages(vec![user_message])
     .with_stop_requested(false);
 let result = agent.run(input)?;
-```
-
-#### `GraphRunner`
-
-不经过 `Agent`，直接执行 graph。
-
-```rust
-use agent_core::graph_runner::{GraphRunInput, GraphRunner};
-
-let run = GraphRunner::new().run(
-    &graph,
-    GraphRunInput {
-        initial_messages: vec![user_message],
-        ..Default::default()
-    },
-)?;
-```
-
-#### `GraphRunInput`
-
-直接运行 graph 时传入初始消息和停止标记。
-
-```rust
-use agent_core::graph_runner::GraphRunInput;
-
-let input = GraphRunInput {
-    initial_messages: vec![user_message],
-    stop_requested: false,
-    ..Default::default()
-};
-```
-
-#### `GraphRunResult`
-
-读取 graph runner 的输出。
-
-```rust
-let run = GraphRunner::new().run(&graph, input)?;
-let status = run.status;
-let messages = run.messages;
-let state = run.state;
-```
-
-#### `GraphRunStatus`
-
-匹配 graph run 状态。
-
-```rust
-use agent_core::graph_runner::GraphRunStatus;
-
-match run.status {
-    GraphRunStatus::Completed => {}
-    GraphRunStatus::Cancelled => {}
-    GraphRunStatus::BudgetExceeded | GraphRunStatus::Failed => {}
-}
 ```
 
 ### 挂 Hook Handler
@@ -782,13 +892,16 @@ let assistant = builder.finish()?;
 #### `ContextBuildInput`
 
 准备构建 provider-neutral request 所需的消息、工具和 metadata。
+如果前面用 `ToolRegistry::direct_schemas` 得到了 `direct_tools`，这里才是它真正生效的位置。
 
 ```rust
 use agent_core::context::ContextBuildInput;
 
+let direct_tools = registry.direct_schemas(&definition);
+
 let mut input = ContextBuildInput::new("mimo-v2.5-pro");
 input.run_messages.push(user_message);
-input.visible_tool_schemas = registry.direct_schemas(&definition);
+input.visible_tool_schemas = direct_tools;
 input.metadata.insert(
     "stable_prefix_id".to_string(),
     serde_json::json!(prefix_id),
@@ -1337,20 +1450,20 @@ let memory = sample_cross_app_map()?;
 
 #### 回归检查
 
-回归测试覆盖 tool 注册、visibility guard、session replay 概率图、工具预执行、task-bound context、key routing、复杂 graph 和百步级工具任务。本文不把这些测试命令作为可运行示例；唯一的 runnable path 是顶部已经跑通的真实 ReAct Android 百步任务。
+回归测试覆盖 tool 注册、visibility guard、session replay 概率图、工具预执行、task-bound context、key routing、复杂 graph 和百步级工具任务。逐项功能意义审计见 [18-public-api-meaning-audit](../18-public-api-meaning-audit/README.md)。本文不把这些测试命令作为可运行示例；唯一的 runnable path 是顶部已经跑通的真实 ReAct Android 百步任务。
 
 ## 稳定性说明
 
 - Mobilerun-like example 当前依赖的 public API surface 以上一节为准；新增 example 对 core 的调用前，必须同步更新该说明和 `CAPABILITY_MAP.md`。
 - provider-specific 类型不能泄漏到 tool API。
-- `GraphState` 可用于 debug/checkpoint，但外部不要直接可变写入。
+- `GraphRunResult.state` 可用于 debug/checkpoint，但外部不要直接可变写入 runtime state。
 - 所有 public error 使用 `AgentCoreError`。
 - 示例能编译运行才算 API 文档有效。
 
 ## 后续拓展方案
 
 - 增加 runtime-level event subscription，而不是只从 run result 读取事件。
-- 增加外部 node executor，让 `GraphNodeAction::Agent` 真正调用 child `Agent`。
+- 增加可组合的 node executor registry，让 agent/tool/subgraph node 能按名字路由到不同执行器。
 - 把 `HandlerRegistry` 接入 `AgentServices`，让 runner 自动触发生命周期 hook。
 - 增加跨进程 tool/provider adapter 和 plugin manifest。
 - 增加 background run、remote session store 和 trace viewer。

@@ -384,13 +384,29 @@ Graph probe 使用 core graph primitives：
 
 ```rust
 let graph = Graph::builder("mobilerun_fast_turn")
-    .node(GraphNode::new("input").with_action(GraphNodeAction::PassthroughInput))
-    .node(GraphNode::new("assistant").with_action(GraphNodeAction::EmitMessages(vec![assistant_message])))
-    .edge(GraphEdge::new("input_to_assistant", "input", "assistant"))
-    .start_node("input")
+    .node(GraphNode::agent(
+        "agent_turn",
+        "mobilerun_agent",
+        InputPackageSpec::new("context")
+            .required("instruction", MessageQuery::any(), Cardinality::Latest),
+    ).output("tool_calls"))
+    .node(GraphNode::final_node(
+        "done",
+        InputPackageSpec::new("calls").required(
+            "tool_call",
+            MessageQuery::where_eq("content[*].type", "tool_call"),
+            Cardinality::Latest,
+        ),
+    ))
+    .edge("input_to_agent", ("input", "messages"), ("agent_turn", "context"))
+    .edge("agent_to_done", ("agent_turn", "tool_calls"), ("done", "calls"))
+    .finish_at("done")
     .build()?;
 
-let agent = AgentFactory::default().create(definition.clone())?;
+let services = AgentServices {
+    graph_runner: GraphRunner::with_executor(Arc::new(scripted_executor)),
+};
+let agent = AgentFactory::new(services).create(definition.clone())?;
 let result = agent.run(AgentRunInput::new(graph).with_initial_messages(vec![user_message]))?;
 ```
 
@@ -398,10 +414,11 @@ let result = agent.run(AgentRunInput::new(graph).with_initial_messages(vec![user
 
 - `Graph`
 - `GraphNode`
-- `GraphNodeAction`
 - `GraphEdge`
-- `ActivationCondition`
-- `GraphStateBudget`
+- `InputPackageSpec`
+- `MessageQuery`
+- `NodeExecutor`
+- `GraphRunner`
 - `AgentFactory`
 - `AgentRunInput`
 - `AgentRunResult`

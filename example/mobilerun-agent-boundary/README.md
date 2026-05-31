@@ -118,12 +118,13 @@ $env:MOBILERUN_GENERAL_POOL_API_KEY="<second test key>"
 
 构建 graph：
 
-使用 `Graph::builder()` 定义 node 和 edge。edge 只判断 source node 某一次输出是否满足条件；循环预算由 graph runner 管，不放在 edge 内。示例展示了两种图：
+使用 `Graph::builder()` 定义 node、output port、edge 和 input package。edge 只做内容传输：从 `(node, port)` 读取 output log，按目标 package item 的 `MessageQuery` 筛选后写入下游 package。示例展示了三种图：
 
-- `mobilerun_fast_turn`：input -> fast agent turn -> done。
-- `mobilerun_reasoning_manager_executor`：manager plan -> executor action -> manager check。
+- `mobilerun_fast_turn`：`input.messages -> agent.context -> mark_done.calls -> final.answer`。
+- `mobilerun_reasoning_manager_executor`：manager agent -> executor agent -> manager check -> final。
+- `mobilerun_complex_task_dag`：task/dependency package 解锁两个并行工具节点，再 fan-in 到 manager package。
 
-这两个图都只使用 core public graph API。真实 provider/tool node 执行仍是 runtime adapter 的职责。
+这些图都只使用 core public graph API。真实 provider/tool/agent node 执行由 `NodeExecutor` 注入，本示例用 scripted executor 模拟真实服务结果。
 
 读取 event：
 
@@ -135,14 +136,14 @@ Mobilerun-style streaming event 可以由 `CoreEvent` 投影出来。本示例�
 
 终止 graph：
 
-调用 `AgentRunInput::with_stop_requested(true)` 可在启动前取消；运行中的取消由 `Agent::cancel()` 和 cancellation token 表达。最大执行数通过 `GraphStateBudget` 保护。
+调用 `AgentRunInput::with_stop_requested(true)` 可在启动前取消；运行中的取消由 `Agent::cancel()` 和 cancellation token 表达。循环保护通过 `GraphRunInput::with_max_ticks()` 或 agent runner 的默认 tick budget 生效。
 
 ## 可拓展点
 
 - 把 mock tool 换成真实 Android/iOS/browser adapter，但保持 `Tool` trait 和 `ToolSchema` 不变。
 - 把 scripted assistant 换成真实 provider streaming adapter，但保持 `AssistantBuilder` 和 `LlmStreamEvent` 到 `RunMessage` 的路径不变。
 - 给 `HandlerRegistry` 增加生产级 handler，例如权限审批、可恢复错误转换、trace 上报、provider fallback。
-- 扩展 graph node 外部执行器，让 `GraphNodeAction::Agent` 和 provider/tool node 由 runtime 注入执行。
+- 扩展 graph node executor registry，让 agent/tool/subgraph node 按名字路由到真实 provider、工具和 child agent。
 - 在 core 之外增加结构化输出校验器、credential vault、视觉 parser 和真实移动端 observation parser。
 
 ## 当前边界

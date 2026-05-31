@@ -1,19 +1,58 @@
-use crate::error::AgentCoreResult;
-use crate::event::CoreEvent;
-use crate::graph::Graph;
-use crate::graph_edge::EdgeDecision;
-use crate::graph_node::{NodeExecutionInput, NodeId};
-use crate::graph_state::{FiredEdgeRecord, GraphState, NodeMessageRecord};
-use crate::run_message::RunMessage;
+use std::fmt;
+use std::sync::Arc;
+
+use futures::executor::block_on;
+use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
 use uuid::Uuid;
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+use crate::error::{AgentCoreError, AgentCoreResult};
+use crate::event::CoreEvent;
+use crate::graph::Graph;
+use crate::graph_runtime::{
+    self as rt, GraphRunLedger, GraphRuntime, GraphRuntimeServices, GraphRuntimeState,
+    NodeExecutionContext, NodeExecutor, NodeInput, NodeKind, NodeOutput,
+};
+use crate::run_message::RunMessage;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphRunInput {
     pub run_id: Option<Uuid>,
     pub initial_messages: Vec<RunMessage>,
     pub stop_requested: bool,
+    pub max_ticks: usize,
+}
+
+impl GraphRunInput {
+    pub fn new(initial_messages: Vec<RunMessage>) -> Self {
+        Self {
+            run_id: None,
+            initial_messages,
+            stop_requested: false,
+            max_ticks: 10_000,
+        }
+    }
+
+    pub fn with_run_id(mut self, run_id: Uuid) -> Self {
+        self.run_id = Some(run_id);
+        self
+    }
+
+    pub fn with_stop_requested(mut self, stop_requested: bool) -> Self {
+        self.stop_requested = stop_requested;
+        self
+    }
+
+    pub fn with_max_ticks(mut self, max_ticks: usize) -> Self {
+        self.max_ticks = max_ticks;
+        self
+    }
+}
+
+impl Default for GraphRunInput {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -22,7 +61,8 @@ pub struct GraphRunResult {
     pub status: GraphRunStatus,
     pub messages: Vec<RunMessage>,
     pub events: Vec<CoreEvent>,
-    pub state: GraphState,
+    pub state: GraphRuntimeState,
+    pub ledger: GraphRunLedger,
     pub error: Option<String>,
 }
 
@@ -30,176 +70,102 @@ pub struct GraphRunResult {
 #[serde(rename_all = "snake_case")]
 pub enum GraphRunStatus {
     Completed,
+    Drained,
     Cancelled,
     BudgetExceeded,
     Failed,
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct GraphRunner;
+#[derive(Clone)]
+pub struct GraphRunner {
+    services: GraphRuntimeServices,
+}
 
 impl GraphRunner {
     pub fn new() -> Self {
-        Self
+        Self::with_executor(Arc::new(DefaultNodeExecutor))
+    }
+
+    pub fn with_executor(executor: Arc<dyn NodeExecutor>) -> Self {
+        Self {
+            services: GraphRuntimeServices::new(executor),
+        }
+    }
+
+    pub fn with_services(services: GraphRuntimeServices) -> Self {
+        Self { services }
     }
 
     pub fn run(&self, graph: &Graph, input: GraphRunInput) -> AgentCoreResult<GraphRunResult> {
         let run_id = input.run_id.unwrap_or_else(Uuid::new_v4);
-        let mut state = GraphState::new(run_id, graph.budget().clone());
         let mut events = vec![CoreEvent::GraphStarted {
             run_id,
             graph_name: graph.name().to_string(),
         }];
-        let mut runnable = graph
-            .start_node_ids()
-            .iter()
-            .cloned()
-            .map(|node_id| RunnableNode {
-                node_id,
-                input_messages: input.initial_messages.clone(),
-            })
-            .collect::<VecDeque<_>>();
 
         if input.stop_requested {
-            state.request_stop();
-        }
-
-        while let Some(runnable_node) = runnable.pop_front() {
-            if state.is_stop_requested() {
-                return Ok(Self::finish(
-                    graph,
-                    GraphRunStatus::Cancelled,
-                    state,
-                    events,
-                    None,
-                ));
-            }
-
-            let node_id = runnable_node.node_id;
-            let Some(node) = graph.node(&node_id) else {
-                return Ok(Self::finish(
-                    graph,
-                    GraphRunStatus::Failed,
-                    state,
-                    events,
-                    Some(format!("graph node not found: {node_id}")),
-                ));
-            };
-
-            if let Err(error) = state.record_node_execution(node.id()) {
-                return Ok(Self::finish(
-                    graph,
-                    GraphRunStatus::BudgetExceeded,
-                    state,
-                    events,
-                    Some(error.to_string()),
-                ));
-            }
-
-            events.push(CoreEvent::NodeStarted {
+            events.push(CoreEvent::GraphEnded {
                 run_id,
-                node_id: node_id.clone(),
+                graph_name: graph.name().to_string(),
+                status: GraphRunStatus::Cancelled.as_str().to_string(),
             });
-
-            let node_result = node.execute(
-                NodeExecutionInput {
-                    input_messages: runnable_node.input_messages,
-                },
-                |message| {
-                    let record = state.append_message(node_id.clone(), message);
-                    events.push(CoreEvent::MessageEmitted {
-                        run_id,
-                        node_id: record.node_id.clone(),
-                        message_id: record.message.id,
-                    });
-                    Self::process_node_message(graph, &mut state, record, &mut runnable)
-                },
-            )?;
-
-            events.push(CoreEvent::NodeEnded {
+            return Ok(GraphRunResult {
                 run_id,
-                node_id: node_id.clone(),
-                emitted_messages: node_result.emitted_messages,
+                status: GraphRunStatus::Cancelled,
+                messages: input.initial_messages,
+                events,
+                state: GraphRuntimeState::default(),
+                ledger: GraphRunLedger::default(),
+                error: None,
             });
-
-            if node.is_terminal() || graph.is_end_node(node.id()) {
-                return Ok(Self::finish(
-                    graph,
-                    GraphRunStatus::Completed,
-                    state,
-                    events,
-                    None,
-                ));
-            }
         }
 
-        Ok(Self::finish(
-            graph,
-            GraphRunStatus::Completed,
-            state,
-            events,
-            None,
-        ))
-    }
+        let runtime_input = rt::GraphRunInput::new(input.initial_messages)
+            .with_run_id(run_id)
+            .with_max_ticks(input.max_ticks);
+        let output =
+            block_on(GraphRuntime::new(graph.clone(), self.services.clone()).run(runtime_input))?;
+        let status = GraphRunStatus::from(output.status);
 
-    fn process_node_message(
-        graph: &Graph,
-        state: &mut GraphState,
-        record: NodeMessageRecord,
-        runnable: &mut VecDeque<RunnableNode>,
-    ) -> AgentCoreResult<()> {
-        for edge in graph.outgoing_edges(&record.node_id) {
-            let fired_record = FiredEdgeRecord::new(
-                edge.id(),
-                record.node_id.clone(),
-                record.version,
-                edge.target_node_id(),
-            );
-
-            if state.has_edge_fired(&fired_record) {
-                continue;
-            }
-
-            let decision = edge.evaluate(&record.message, record.version, &state.view())?;
-            if let EdgeDecision::Activate { target_node_id, .. } = decision {
-                if state.mark_edge_fired(fired_record) {
-                    let input_messages = state
-                        .messages_for_node(&record.node_id)
-                        .iter()
-                        .map(|record| record.message.clone())
-                        .collect();
-                    runnable.push_back(RunnableNode {
-                        node_id: target_node_id,
-                        input_messages,
-                    });
-                }
-            }
+        events.extend(core_events_from_runtime(
+            run_id,
+            &output.state,
+            &output.ledger,
+        ));
+        if let Some(error) = &output.error {
+            events.push(CoreEvent::Error {
+                run_id: Some(run_id),
+                message: error.clone(),
+                recoverable: status != GraphRunStatus::Failed,
+            });
         }
-
-        Ok(())
-    }
-
-    fn finish(
-        graph: &Graph,
-        status: GraphRunStatus,
-        state: GraphState,
-        mut events: Vec<CoreEvent>,
-        error: Option<String>,
-    ) -> GraphRunResult {
         events.push(CoreEvent::GraphEnded {
-            run_id: state.run_id(),
+            run_id,
             graph_name: graph.name().to_string(),
             status: status.as_str().to_string(),
         });
 
-        GraphRunResult {
-            run_id: state.run_id(),
+        Ok(GraphRunResult {
+            run_id,
             status,
-            messages: state.all_messages(),
+            messages: output.messages,
             events,
-            state,
-            error,
-        }
+            state: output.state,
+            ledger: output.ledger,
+            error: output.error,
+        })
+    }
+}
+
+impl Default for GraphRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for GraphRunner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GraphRunner").finish_non_exhaustive()
     }
 }
 
@@ -207,6 +173,7 @@ impl GraphRunStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Completed => "completed",
+            Self::Drained => "drained",
             Self::Cancelled => "cancelled",
             Self::BudgetExceeded => "budget_exceeded",
             Self::Failed => "failed",
@@ -214,10 +181,81 @@ impl GraphRunStatus {
     }
 }
 
-#[derive(Clone, Debug)]
-struct RunnableNode {
-    node_id: NodeId,
-    input_messages: Vec<RunMessage>,
+impl From<rt::GraphRunStatus> for GraphRunStatus {
+    fn from(value: rt::GraphRunStatus) -> Self {
+        match value {
+            rt::GraphRunStatus::Completed => Self::Completed,
+            rt::GraphRunStatus::Drained => Self::Drained,
+            rt::GraphRunStatus::BudgetExceeded => Self::BudgetExceeded,
+            rt::GraphRunStatus::Failed => Self::Failed,
+        }
+    }
+}
+
+fn core_events_from_runtime(
+    run_id: Uuid,
+    state: &GraphRuntimeState,
+    ledger: &GraphRunLedger,
+) -> Vec<CoreEvent> {
+    let mut events = Vec::new();
+    for attempt in &ledger.node_attempts {
+        events.push(CoreEvent::NodeStarted {
+            run_id,
+            node_id: attempt.node.clone(),
+        });
+        for entry in state
+            .output_logs
+            .values()
+            .flat_map(|entries| entries.iter())
+            .filter(|entry| entry.node == attempt.node)
+        {
+            events.push(CoreEvent::MessageEmitted {
+                run_id,
+                node_id: attempt.node.clone(),
+                message_id: entry.message.id,
+            });
+        }
+        events.push(CoreEvent::NodeEnded {
+            run_id,
+            node_id: attempt.node.clone(),
+            emitted_messages: state
+                .output_logs
+                .values()
+                .flat_map(|entries| entries.iter())
+                .filter(|entry| entry.node == attempt.node)
+                .count(),
+        });
+    }
+    events
+}
+
+#[derive(Debug)]
+struct DefaultNodeExecutor;
+
+impl NodeExecutor for DefaultNodeExecutor {
+    fn execute(
+        &self,
+        node: rt::NodeSpec,
+        _input: NodeInput,
+        _ctx: NodeExecutionContext,
+    ) -> BoxFuture<'static, AgentCoreResult<NodeOutput>> {
+        Box::pin(async move {
+            match node.kind {
+                NodeKind::Final | NodeKind::Transform { .. } => Ok(NodeOutput::new()),
+                NodeKind::Agent(spec) => Err(AgentCoreError::InvalidConfig(format!(
+                    "agent node `{}` requires a GraphRunner executor",
+                    spec.agent_name
+                ))),
+                NodeKind::Tool(spec) => Err(AgentCoreError::InvalidConfig(format!(
+                    "tool node `{}` requires a GraphRunner executor",
+                    spec.tool_name
+                ))),
+                NodeKind::Graph { graph_name } => Err(AgentCoreError::InvalidConfig(format!(
+                    "subgraph node `{graph_name}` requires a GraphRunner executor"
+                ))),
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -225,104 +263,136 @@ mod tests {
     use super::*;
     use crate::content_block::ContentBlock;
     use crate::graph::Graph;
-    use crate::graph_edge::{ActivationCondition, GraphEdge};
-    use crate::graph_node::{GraphNode, GraphNodeAction};
-    use crate::graph_state::GraphStateBudget;
+    use crate::graph_node::{Cardinality, GraphNode, InputPackageSpec, MessageQuery, NodeKind};
+    use serde_json::json;
 
     fn message(text: &str) -> RunMessage {
-        RunMessage::assistant(vec![ContentBlock::text(text)]).unwrap()
+        RunMessage::user(vec![ContentBlock::text(text)]).unwrap()
+    }
+
+    #[derive(Debug)]
+    struct EmitExecutor;
+
+    impl NodeExecutor for EmitExecutor {
+        fn execute(
+            &self,
+            node: rt::NodeSpec,
+            _input: NodeInput,
+            _ctx: NodeExecutionContext,
+        ) -> BoxFuture<'static, AgentCoreResult<NodeOutput>> {
+            Box::pin(async move {
+                match node.kind {
+                    NodeKind::Final => Ok(NodeOutput::new()),
+                    _ => Ok(NodeOutput::new().with_message(
+                        "out",
+                        RunMessage::assistant(vec![ContentBlock::text(format!(
+                            "{} output",
+                            node.id
+                        ))])?,
+                    )),
+                }
+            })
+        }
     }
 
     #[test]
-    fn runner_executes_terminal_start_node() {
+    fn runner_executes_package_graph_with_runtime_state() {
         let graph = Graph::builder("test")
-            .node(GraphNode::new("start").terminal(true))
-            .start_node("start")
-            .end_node("start")
+            .node(GraphNode::final_node(
+                "final",
+                InputPackageSpec::new("input").required(
+                    "turn",
+                    MessageQuery::any(),
+                    Cardinality::Latest,
+                ),
+            ))
+            .edge("input_to_final", ("input", "messages"), ("final", "input"))
+            .finish_at("final")
             .build()
             .unwrap();
 
         let result = GraphRunner::new()
-            .run(&graph, GraphRunInput::default())
+            .run(&graph, GraphRunInput::new(vec![message("go")]))
             .unwrap();
 
         assert_eq!(result.status, GraphRunStatus::Completed);
-        assert_eq!(result.state.total_node_executions(), 1);
-    }
-
-    #[test]
-    fn runner_activates_target_when_source_emits_matching_message() {
-        let graph = Graph::builder("test")
-            .node(
-                GraphNode::new("source")
-                    .with_action(GraphNodeAction::EmitMessages(vec![message("go")])),
-            )
-            .node(GraphNode::new("target").terminal(true))
-            .start_node("source")
-            .end_node("target")
-            .edge(
-                GraphEdge::new("source_to_target", "source", "target")
-                    .with_activation_condition(ActivationCondition::MessageHasText),
-            )
-            .build()
-            .unwrap();
-
-        let result = GraphRunner::new()
-            .run(&graph, GraphRunInput::default())
-            .unwrap();
-
-        assert_eq!(result.status, GraphRunStatus::Completed);
-        assert_eq!(result.state.node_execution_count("source"), 1);
-        assert_eq!(result.state.node_execution_count("target"), 1);
-        assert_eq!(result.state.fired_edges().len(), 1);
-    }
-
-    #[test]
-    fn runner_passes_full_source_context_to_activated_target() {
-        let graph = Graph::builder("test")
-            .node(
-                GraphNode::new("source")
-                    .with_action(GraphNodeAction::EmitMessages(vec![message("go")])),
-            )
-            .node(GraphNode::new("target").with_action(GraphNodeAction::PassthroughInput))
-            .start_node("source")
-            .edge(
-                GraphEdge::new("source_to_target", "source", "target")
-                    .with_activation_condition(ActivationCondition::MessageHasText),
-            )
-            .build()
-            .unwrap();
-
-        let result = GraphRunner::new()
-            .run(&graph, GraphRunInput::default())
-            .unwrap();
-
-        assert_eq!(result.state.node_execution_count("target"), 1);
-        assert_eq!(result.state.message_count("target"), 1);
+        assert_eq!(result.ledger.transfers.len(), 1);
+        assert_eq!(result.ledger.node_attempts.len(), 1);
         assert_eq!(
-            result.state.messages_for_node("target")[0].message.content,
-            vec![ContentBlock::text("go")]
+            result.state.package_states.values().next().unwrap().version,
+            1
         );
     }
 
     #[test]
-    fn runner_reports_budget_exceeded() {
+    fn runner_uses_custom_executor_for_agent_or_tool_nodes() {
         let graph = Graph::builder("test")
-            .node(GraphNode::new("start"))
-            .start_node("start")
-            .budget(GraphStateBudget {
-                max_total_node_executions: Some(0),
-                max_node_executions: Some(1),
-                max_no_progress_ticks: None,
-            })
+            .node(
+                GraphNode::new(
+                    "source",
+                    NodeKind::Transform {
+                        executor: "emit".to_string(),
+                        config: json!({}),
+                    },
+                    InputPackageSpec::new("input").required(
+                        "turn",
+                        MessageQuery::any(),
+                        Cardinality::Latest,
+                    ),
+                )
+                .output("out"),
+            )
+            .node(GraphNode::final_node(
+                "final",
+                InputPackageSpec::new("done").required(
+                    "text",
+                    MessageQuery::where_exists("content[*].text"),
+                    Cardinality::Latest,
+                ),
+            ))
+            .edge(
+                "input_to_source",
+                ("input", "messages"),
+                ("source", "input"),
+            )
+            .edge("source_to_final", ("source", "out"), ("final", "done"))
+            .finish_at("final")
+            .build()
+            .unwrap();
+
+        let result = GraphRunner::with_executor(Arc::new(EmitExecutor))
+            .run(&graph, GraphRunInput::new(vec![message("go")]))
+            .unwrap();
+
+        assert_eq!(result.status, GraphRunStatus::Completed);
+        assert!(result.messages.iter().any(|message| message
+            .content
+            .contains(&ContentBlock::text("source output"))));
+    }
+
+    #[test]
+    fn runner_reports_cancelled_before_runtime_starts() {
+        let graph = Graph::builder("test")
+            .node(GraphNode::final_node(
+                "final",
+                InputPackageSpec::new("input").required(
+                    "turn",
+                    MessageQuery::any(),
+                    Cardinality::Latest,
+                ),
+            ))
+            .finish_at("final")
             .build()
             .unwrap();
 
         let result = GraphRunner::new()
-            .run(&graph, GraphRunInput::default())
+            .run(
+                &graph,
+                GraphRunInput::new(vec![message("stop")]).with_stop_requested(true),
+            )
             .unwrap();
 
-        assert_eq!(result.status, GraphRunStatus::BudgetExceeded);
-        assert!(result.error.is_some());
+        assert_eq!(result.status, GraphRunStatus::Cancelled);
+        assert!(result.state.output_logs.is_empty());
     }
 }
